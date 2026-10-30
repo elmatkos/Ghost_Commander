@@ -1,5 +1,7 @@
 //! Core logic for Ghost Commander: directory listing, no UI dependencies.
 
+pub mod jobs;
+
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
