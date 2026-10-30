@@ -6,6 +6,7 @@ mod panel;
 mod shell_menu;
 mod theme;
 mod theme_editor;
+mod viewer;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -18,6 +19,7 @@ use about::About;
 use gc_archive::ArchiveIndex;
 use panel::{Panel, PanelAction};
 use theme_editor::ThemeManager;
+use viewer::Viewer;
 
 enum Dialog {
     Confirm(Op),
@@ -44,6 +46,7 @@ struct App {
     apply_all: bool,
     about: About,
     themes: ThemeManager,
+    viewer: Viewer,
 }
 
 impl App {
@@ -59,6 +62,28 @@ impl App {
             apply_all: false,
             about: About::default(),
             themes: ThemeManager::load(&cc.egui_ctx),
+            viewer: Viewer::default(),
+        }
+    }
+
+    /// F3: built-in viewer. F4: external editor.
+    fn view_or_edit(&mut self, edit: bool) {
+        let Some(file) = self.panels[self.active].current_file() else {
+            self.status = Some("Select a file on disk first (archives and folders are not supported yet).".into());
+            return;
+        };
+        self.status = None;
+        let result = if edit {
+            #[cfg(windows)]
+            let editor = "notepad";
+            #[cfg(not(windows))]
+            let editor = "xdg-open";
+            std::process::Command::new(editor).arg(&file).spawn().map(|_| ())
+        } else {
+            self.viewer.open(&file)
+        };
+        if let Err(e) = result {
+            self.status = Some(format!("{}: {e}", file.display()));
         }
     }
 
@@ -147,9 +172,18 @@ impl App {
                 self.open_dialog_for(key, shift);
             }
         }
-        // Del / Shift+Del behave like F8 / Shift+F8.
-        if pressed(ctx, Key::Delete) {
-            self.open_dialog_for(Key::F8, shift);
+        // Del / Shift+Del behave like F8 / Shift+F8. egui turns Shift+Del into a Cut event
+        // on Windows and never reports the key press, so look for the event too.
+        // (Ctrl+X is a Cut event as well, hence the modifier check.)
+        let cut = ctx.input(|i| i.modifiers.shift && !i.modifiers.command && i.events.iter().any(|e| matches!(e, egui::Event::Cut)));
+        if pressed(ctx, Key::Delete) || cut {
+            self.open_dialog_for(Key::F8, shift || cut);
+        }
+        if pressed(ctx, Key::F3) {
+            self.view_or_edit(false);
+        }
+        if pressed(ctx, Key::F4) {
+            self.view_or_edit(true);
         }
         let ctrl = ctx.input(|i| i.modifiers.ctrl);
         for (key, panel) in [(Key::Num1, 0), (Key::Num2, 1)] {
@@ -393,7 +427,7 @@ impl eframe::App for App {
     }
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        let dialog_open = self.dialog.is_some() || self.about.open || self.themes.open || self.jobs.iter().any(|j| j.job.progress.pending_conflict().is_some());
+        let dialog_open = self.dialog.is_some() || self.about.open || self.themes.open || self.viewer.is_open() || self.jobs.iter().any(|j| j.job.progress.pending_conflict().is_some());
         if !dialog_open {
             self.handle_keys(ctx);
         }
@@ -405,7 +439,7 @@ impl eframe::App for App {
             }
             self.show_jobs(ui);
             ui.horizontal(|ui| {
-                for (key, label) in [("F5", "Copy"), ("F6", "Move"), ("F7", "MkDir"), ("F8/Del", "Recycle"), ("Shift+F8/Del", "Delete")] {
+                for (key, label) in [("F3", "View"), ("F4", "Edit"), ("F5", "Copy"),("F6", "Move"), ("F7", "MkDir"), ("F8/Del", "Recycle"), ("Shift+F8/Del", "Delete")] {
                     ui.monospace(format!("{key} {label}"));
                     ui.add_space(12.0);
                 }
@@ -440,6 +474,7 @@ impl eframe::App for App {
         self.show_conflict(ctx);
         self.about.show(ctx);
         self.themes.show(ctx);
+        self.viewer.show(ctx);
 
         if self.jobs.iter().any(|j| !j.job.progress.finished.load(Ordering::Acquire)) {
             ctx.request_repaint_after(Duration::from_millis(50));

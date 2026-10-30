@@ -299,6 +299,12 @@ impl Panel {
         Some((a.index.clone(), inner))
     }
 
+    /// The plain file under the cursor, for F3 / F4 (not a folder, not inside an archive).
+    pub fn current_file(&self) -> Option<PathBuf> {
+        let e = self.entries.get(self.cursor)?;
+        (self.archive.is_none() && !e.is_dir && e.name != PARENT).then(|| e.path.clone())
+    }
+
     /// Marked entries, or the one under the cursor when nothing is marked.
     pub fn targets(&self) -> Vec<PathBuf> {
         if self.marked.is_empty() {
