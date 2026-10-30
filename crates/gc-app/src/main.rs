@@ -160,10 +160,11 @@ impl App {
         if pressed(ctx, Key::Tab) {
             self.active = 1 - self.active;
         }
-        if pressed(ctx, Key::F1) {
+        // Consume the key: the window it opens also closes on the same key and must not see this press.
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::F1)) {
             self.about.open = true;
         }
-        if pressed(ctx, Key::F9) {
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::F9)) {
             self.themes.open = true;
         }
         let shift = ctx.input(|i| i.modifiers.shift);
