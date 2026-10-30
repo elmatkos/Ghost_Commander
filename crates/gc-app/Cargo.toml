@@ -1,0 +1,12 @@
+[package]
+name = "gc-app"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "ghost-commander"
+path = "src/main.rs"
+
+[dependencies]
+gc-core = { path = "../gc-core" }
+eframe = "0.31"
