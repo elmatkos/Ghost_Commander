@@ -54,6 +54,8 @@ pub struct Progress {
     prompt: Mutex<Option<PathBuf>>,
     answer: Mutex<Option<(Resolution, bool)>>,
     answered: Condvar,
+    /// Held while asking, so parallel workers queue up behind one prompt at a time.
+    ask_turn: Mutex<()>,
 }
 
 impl Progress {
@@ -82,8 +84,12 @@ impl Progress {
 
     /// Called by the worker: blocks until the UI answers (or the job is cancelled).
     fn ask_conflict(&self, target: &Path) -> Resolution {
+        let _turn = self.ask_turn.lock().unwrap();
         if let Some(r) = *self.sticky.lock().unwrap() {
             return r;
+        }
+        if self.cancelled() {
+            return Resolution::Cancel;
         }
         *self.prompt.lock().unwrap() = Some(target.to_path_buf());
         let mut answer = self.answer.lock().unwrap();

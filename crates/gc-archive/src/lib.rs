@@ -173,29 +173,37 @@ impl ArchiveIndex {
         }
     }
 
+    /// Deflate is CPU-bound and entries are independent, so files are spread over all cores;
+    /// every chunk opens its own handle because `ZipArchive` is not shareable.
     fn extract_zip(&self, items: &[Item], dest_dir: &Path, p: &Progress) {
-        let mut zip = match File::open(&self.file).map_err(io::Error::other).and_then(|f| zip::ZipArchive::new(BufReader::new(f)).map_err(io::Error::other)) {
-            Ok(z) => z,
-            Err(e) => return p.fail(format!("{}: {e}", self.file.display())),
-        };
-        for entry in items {
-            let rel = &entry.rel;
-            if p.cancelled() {
-                return;
-            }
-            let target = dest_dir.join(rel);
-            let result = if entry.is_dir {
-                fs::create_dir_all(&target)
-            } else {
-                prepare_parent(&target).and_then(|_| {
-                    let mut f = zip.by_index(entry.zip_index).map_err(io::Error::other)?;
-                    jobs::copy_stream(&mut f, entry.size, &target, p).map(|_| ())
-                })
-            };
-            if let Err(e) = result {
+        use rayon::prelude::*;
+
+        for entry in items.iter().filter(|i| i.is_dir) {
+            if let Err(e) = fs::create_dir_all(dest_dir.join(&entry.rel)) {
                 p.fail(format!("{}: {e}", entry.path));
             }
         }
+        let files: Vec<&Item> = items.iter().filter(|i| !i.is_dir).collect();
+        let chunk_len = files.len().div_ceil(rayon::current_num_threads() * 4).max(1);
+        files.par_chunks(chunk_len).for_each(|chunk| {
+            let mut zip = match File::open(&self.file).map_err(io::Error::other).and_then(|f| zip::ZipArchive::new(BufReader::new(f)).map_err(io::Error::other)) {
+                Ok(z) => z,
+                Err(e) => return p.fail(format!("{}: {e}", self.file.display())),
+            };
+            for entry in chunk {
+                if p.cancelled() {
+                    return;
+                }
+                let target = dest_dir.join(&entry.rel);
+                let result = prepare_parent(&target).and_then(|_| {
+                    let mut f = zip.by_index(entry.zip_index).map_err(io::Error::other)?;
+                    jobs::copy_stream(&mut f, entry.size, &target, p).map(|_| ())
+                });
+                if let Err(e) = result {
+                    p.fail(format!("{}: {e}", entry.path));
+                }
+            }
+        });
     }
 
     fn extract_7z(&self, items: &[Item], dest_dir: &Path, p: &Progress) {
@@ -236,6 +244,32 @@ impl ArchiveIndex {
 
 fn prepare_parent(target: &Path) -> io::Result<()> {
     target.parent().map_or(Ok(()), fs::create_dir_all)
+}
+
+/// Per-process scratch folder for archives that live inside other archives.
+fn nested_root() -> PathBuf {
+    std::env::temp_dir().join("Ghost Commander").join(format!("nested-{}", std::process::id()))
+}
+
+/// Opens an archive stored inside `parent` (at inner path `inner`): it is extracted to a
+/// scratch folder first, then indexed like any other archive. Slow for big files, so call it
+/// off the UI thread. The scratch folder is removed by [`cleanup_nested`].
+pub fn open_nested(parent: &ArchiveIndex, inner: &str) -> io::Result<ArchiveIndex> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let dir = nested_root().join(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed).to_string());
+    fs::create_dir_all(&dir)?;
+    let p = Progress::default();
+    parent.extract(&[inner.to_owned()], &dir, &p);
+    if let Some(e) = p.errors().into_iter().next() {
+        return Err(io::Error::other(e));
+    }
+    let name = inner.rsplit('/').next().unwrap_or(inner);
+    open(&dir.join(name))
+}
+
+/// Deletes the scratch folder of [`open_nested`]; call on exit.
+pub fn cleanup_nested() {
+    let _ = fs::remove_dir_all(nested_root());
 }
 
 /// Starts extraction on a worker thread (progress, cancel and conflict dialog included).
@@ -363,6 +397,30 @@ mod tests {
         assert!(p.errors().is_empty(), "{:?}", p.errors());
         assert_eq!(fs::read_to_string(find(&dest, "c.txt").unwrap()).unwrap(), "C");
         assert_eq!(fs::read_to_string(find(&dest, "a.txt").unwrap()).unwrap(), "A");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn archive_inside_archive_opens_via_scratch_copy() {
+        let dir = scratch("nested");
+        let mut inner = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(io::Cursor::new(&mut inner));
+            w.start_file("deep/x.txt", zip::write::SimpleFileOptions::default()).unwrap();
+            w.write_all(b"X").unwrap();
+            w.finish().unwrap();
+        }
+        let mut w = zip::ZipWriter::new(File::create(dir.join("outer.zip")).unwrap());
+        w.start_file("pkg/inner.zip", zip::write::SimpleFileOptions::default()).unwrap();
+        w.write_all(&inner).unwrap();
+        w.finish().unwrap();
+
+        let outer = open(&dir.join("outer.zip")).unwrap();
+        let nested = open_nested(&outer, "pkg/inner.zip").unwrap();
+        assert_eq!(names(&nested.list("")), [("deep", true)]);
+        assert_eq!(names(&nested.list("deep")), [("x.txt", false)]);
+        cleanup_nested();
+        assert!(!nested_root().exists());
         fs::remove_dir_all(&dir).unwrap();
     }
 

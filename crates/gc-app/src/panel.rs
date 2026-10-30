@@ -1,5 +1,7 @@
 use std::collections::HashSet;
+use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
 
 use eframe::egui::{self, Align2, FontId, Sense, Stroke, StrokeKind};
@@ -12,12 +14,35 @@ use crate::theme::Theme;
 struct ArchiveView {
     index: Arc<ArchiveIndex>,
     inner: String,
+    /// Where the archive file lives, for the header (nested archives: `outer.zip\dir\inner.zip`).
+    label: String,
+}
+
+/// An archive being opened on a worker thread.
+struct Loading {
+    rx: Receiver<io::Result<ArchiveIndex>>,
+    label: String,
+    /// Opened from inside the current archive (keeps the current one on the stack).
+    nested: bool,
+}
+
+/// Something the user asked for that only the app can do (it owns the other panel and the jobs).
+pub enum PanelAction {
+    /// Right click on disk items: show the Windows shell menu for them.
+    ShellMenu(Vec<PathBuf>),
+    /// Context menu of an archive item: extract the selection to the other panel.
+    Extract,
 }
 
 pub struct Panel {
     /// Folder on disk; while an archive is open, the archive file itself.
     pub cwd: PathBuf,
     archive: Option<ArchiveView>,
+    /// Archives we descended out of to reach the current nested archive, outermost first.
+    stack: Vec<ArchiveView>,
+    loading: Option<Loading>,
+    ctx: egui::Context,
+    pub action: Option<PanelAction>,
     entries: Vec<Entry>,
     cursor: usize,
     marked: HashSet<PathBuf>,
@@ -28,10 +53,14 @@ pub struct Panel {
 }
 
 impl Panel {
-    pub fn new(cwd: PathBuf) -> Self {
+    pub fn new(cwd: PathBuf, ctx: egui::Context) -> Self {
         let mut p = Self {
             cwd,
             archive: None,
+            stack: Vec::new(),
+            loading: None,
+            ctx,
+            action: None,
             entries: Vec::new(),
             cursor: 0,
             marked: HashSet::new(),
@@ -107,32 +136,61 @@ impl Panel {
 
     /// Opens the folder or archive under the cursor (or goes up on the `..` row).
     pub fn enter(&mut self) {
-        let Some(e) = self.entries.get(self.cursor) else { return };
+        if self.loading.is_some() {
+            return;
+        }
+        let Some(e) = self.entries.get(self.cursor).cloned() else { return };
         if e.name == PARENT {
             self.go_up();
         } else if let Some(a) = &mut self.archive {
             if e.is_dir {
                 a.inner = join_inner(&a.inner, &e.name);
                 self.enter_listing();
+            } else if gc_archive::is_archive(&e.path) {
+                let index = a.index.clone();
+                let inner = join_inner(&a.inner, &e.name);
+                let label = format!("{}\\{}", self.location(), e.name);
+                self.start_loading(label, true, move || gc_archive::open_nested(&index, &inner));
             }
         } else if e.is_dir {
-            let path = e.path.clone();
-            self.go_to(path, None);
+            self.go_to(e.path, None);
         } else if gc_archive::is_archive(&e.path) {
-            let path = e.path.clone();
-            self.open_archive(path);
+            let path = e.path;
+            self.start_loading(path.display().to_string(), false, move || gc_archive::open(&path));
         }
     }
 
-    /// Opens an archive file as a folder.
-    fn open_archive(&mut self, file: PathBuf) {
-        match gc_archive::open(&file) {
+    /// Opens an archive on a worker thread so big files never freeze the window.
+    fn start_loading(&mut self, label: String, nested: bool, work: impl FnOnce() -> io::Result<ArchiveIndex> + Send + 'static) {
+        let (tx, rx) = mpsc::channel();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(work());
+            ctx.request_repaint();
+        });
+        self.loading = Some(Loading { rx, label, nested });
+    }
+
+    /// Picks up a finished archive open; called every frame.
+    pub fn poll(&mut self) {
+        let Some(l) = &self.loading else { return };
+        let result = match l.rx.try_recv() {
+            Ok(r) => r,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => Err(io::Error::other("worker stopped")),
+        };
+        let Some(l) = self.loading.take() else { return };
+        match result {
             Ok(index) => {
-                self.archive = Some(ArchiveView { index: Arc::new(index), inner: String::new() });
-                self.cwd = file;
+                let outer = self.archive.take();
+                if l.nested {
+                    self.stack.extend(outer);
+                }
+                self.cwd = index.file.clone();
+                self.archive = Some(ArchiveView { index: Arc::new(index), inner: String::new(), label: l.label });
                 self.enter_listing();
             }
-            Err(e) => self.error = Some(format!("{}: {e}", file.display())),
+            Err(e) => self.error = Some(format!("{}: {e}", l.label)),
         }
     }
 
@@ -150,6 +208,7 @@ impl Panel {
     }
 
     pub fn go_up(&mut self) {
+        self.loading = None; // Backspace also cancels an archive that is still opening
         if let Some(a) = &mut self.archive {
             if let Some((parent, name)) = a.inner.rsplit_once('/') {
                 let (parent, name) = (parent.to_owned(), name.to_owned());
@@ -162,6 +221,17 @@ impl Panel {
                 let name = std::mem::take(&mut a.inner);
                 self.enter_listing();
                 self.select_name(&name);
+                return;
+            }
+            // At the root of a nested archive: back into the archive that holds it.
+            if let Some(outer) = self.stack.pop() {
+                let came_from = self.cwd.file_name().map(|n| n.to_string_lossy().into_owned());
+                self.cwd = outer.index.file.clone();
+                self.archive = Some(outer);
+                self.enter_listing();
+                if let Some(name) = came_from {
+                    self.select_name(&name);
+                }
                 return;
             }
             // At the archive root: leave the archive, landing on the archive file.
@@ -185,7 +255,9 @@ impl Panel {
     }
 
     fn go_to(&mut self, path: PathBuf, select: Option<String>) {
+        self.loading = None;
         let previous_archive = self.archive.take();
+        let previous_stack = std::mem::take(&mut self.stack);
         let previous = std::mem::replace(&mut self.cwd, path);
         self.enter_listing();
         if self.error.is_some() {
@@ -193,6 +265,7 @@ impl Panel {
             let err = self.error.take();
             self.cwd = previous;
             self.archive = previous_archive;
+            self.stack = previous_stack;
             self.reload();
             self.error = err;
         } else if let Some(name) = select {
@@ -208,8 +281,9 @@ impl Panel {
     /// Location text for the header, e.g. `C:\data\x.zip\docs`.
     fn location(&self) -> String {
         match &self.archive {
-            Some(a) if !a.inner.is_empty() => format!("{}\\{}", self.cwd.display(), a.inner.replace('/', "\\")),
-            _ => self.cwd.display().to_string(),
+            Some(a) if !a.inner.is_empty() => format!("{}\\{}", a.label, a.inner.replace('/', "\\")),
+            Some(a) => a.label.clone(),
+            None => self.cwd.display().to_string(),
         }
     }
 
@@ -236,6 +310,7 @@ impl Panel {
 
     /// Draws the panel. Returns true when the user clicked into it.
     pub fn ui(&mut self, ui: &mut egui::Ui, id: &str, active: bool, theme: &Theme) -> bool {
+        self.poll();
         let mut clicked = false;
         let accent = theme.accent.0;
 
@@ -244,7 +319,12 @@ impl Panel {
                 self.go_up();
                 clicked = true;
             }
-            ui.add(egui::Label::new(egui::RichText::new(self.location()).monospace()).truncate());
+            if let Some(l) = &self.loading {
+                ui.spinner();
+                ui.label(format!("Opening {}...", l.label));
+            } else {
+                ui.add(egui::Label::new(egui::RichText::new(self.location()).monospace()).truncate());
+            }
         });
         if let Some(err) = &self.error {
             ui.colored_label(theme.error.0, err);
@@ -274,6 +354,37 @@ impl Panel {
                 if resp.double_clicked() {
                     self.enter();
                     return;
+                }
+                if self.entries[i].name != PARENT {
+                    if resp.secondary_clicked() {
+                        self.cursor = i;
+                        clicked = true;
+                        // Like Explorer: a right click on an unmarked row acts on that row alone.
+                        let path = self.entries[i].path.clone();
+                        if self.archive.is_none() {
+                            let paths = if self.marked.contains(&path) { self.targets() } else { vec![path] };
+                            self.action = Some(PanelAction::ShellMenu(paths));
+                        } else if !self.marked.contains(&path) {
+                            self.marked.clear();
+                        }
+                    }
+                    if self.archive.is_some() {
+                        let mut open = false;
+                        resp.context_menu(|ui| {
+                            if ui.button("Open (Enter)").clicked() {
+                                open = true;
+                                ui.close_menu();
+                            }
+                            if ui.button("Extract to other panel (F5)").clicked() {
+                                self.action = Some(PanelAction::Extract);
+                                ui.close_menu();
+                            }
+                        });
+                        if open {
+                            self.enter();
+                            return;
+                        }
+                    }
                 }
                 let e = &self.entries[i];
                 let painter = ui.painter_at(rect);
@@ -349,6 +460,59 @@ fn fmt_size(bytes: u64) -> String {
 mod tests {
     use super::{fmt_size, Panel, PARENT};
 
+    fn new_panel(root: &std::path::Path) -> Panel {
+        Panel::new(root.to_path_buf(), eframe::egui::Context::default())
+    }
+
+    /// Waits for the archive worker thread, like the UI does over several frames.
+    fn settle(p: &mut Panel) {
+        while p.loading.is_some() {
+            p.poll();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn archive_inside_archive_can_be_entered_and_left() {
+        use std::io::Write;
+        let root = std::env::temp_dir().join(format!("gc_panel_nested_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut inner = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(std::io::Cursor::new(&mut inner));
+            w.start_file("deep/x.txt", zip::write::SimpleFileOptions::default()).unwrap();
+            w.write_all(b"X").unwrap();
+            w.finish().unwrap();
+        }
+        let mut w = zip::ZipWriter::new(std::fs::File::create(root.join("outer.zip")).unwrap());
+        w.start_file("pkg/inner.zip", zip::write::SimpleFileOptions::default()).unwrap();
+        w.write_all(&inner).unwrap();
+        w.finish().unwrap();
+
+        let mut p = new_panel(&root);
+        p.move_cursor(1);
+        p.enter(); // outer.zip
+        settle(&mut p);
+        p.move_cursor(1);
+        p.enter(); // pkg
+        p.move_cursor(1);
+        p.enter(); // inner.zip, opened from inside outer.zip
+        settle(&mut p);
+        let names: Vec<_> = p.entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["..", "deep"]);
+        assert_eq!(p.location(), format!("{}\\pkg\\inner.zip", root.join("outer.zip").display()));
+
+        p.go_up(); // out of inner.zip, back into outer.zip\pkg
+        assert_eq!(p.location(), format!("{}\\pkg", root.join("outer.zip").display()));
+        assert_eq!(p.entries[p.cursor].name, "inner.zip");
+        p.go_up();
+        p.go_up(); // leave outer.zip
+        assert_eq!(p.disk_folder(), Some(root.as_path()));
+        gc_archive::cleanup_nested();
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn archive_opens_like_a_folder_and_leaves_back_to_its_file() {
         use std::io::Write;
@@ -362,10 +526,11 @@ mod tests {
         }
         w.finish().unwrap();
 
-        let mut p = Panel::new(root.clone());
+        let mut p = new_panel(&root);
         assert_eq!(p.entries[p.cursor + 1].name, "t.zip");
         p.move_cursor(1);
         p.enter();
+        settle(&mut p);
         assert!(p.disk_folder().is_none());
         let names: Vec<_> = p.entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["..", "docs", "a.txt"]);
@@ -392,7 +557,7 @@ mod tests {
         std::fs::create_dir_all(root.join("child")).unwrap();
         std::fs::write(root.join("file.txt"), b"x").unwrap();
 
-        let mut p = Panel::new(root.clone());
+        let mut p = new_panel(&root);
         assert_eq!(p.entries[0].name, PARENT);
         assert!(p.targets().is_empty(), "cursor on '..' must not select anything");
 

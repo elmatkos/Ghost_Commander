@@ -3,6 +3,7 @@
 
 mod about;
 mod panel;
+mod shell_menu;
 mod theme;
 mod theme_editor;
 
@@ -15,7 +16,7 @@ use eframe::egui::{self, Key};
 use gc_core::jobs::{self, Job, Op, Resolution};
 use about::About;
 use gc_archive::ArchiveIndex;
-use panel::Panel;
+use panel::{Panel, PanelAction};
 use theme_editor::ThemeManager;
 
 enum Dialog {
@@ -50,7 +51,7 @@ impl App {
         install_icon_font(&cc.egui_ctx);
         let start = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         Self {
-            panels: [Panel::new(start.clone()), Panel::new(start)],
+            panels: [Panel::new(start.clone(), cc.egui_ctx.clone()), Panel::new(start, cc.egui_ctx.clone())],
             active: 0,
             dialog: None,
             jobs: Vec::new(),
@@ -146,12 +147,38 @@ impl App {
                 self.open_dialog_for(key, shift);
             }
         }
+        // Del / Shift+Del behave like F8 / Shift+F8.
+        if pressed(ctx, Key::Delete) {
+            self.open_dialog_for(Key::F8, shift);
+        }
         let ctrl = ctx.input(|i| i.modifiers.ctrl);
         for (key, panel) in [(Key::Num1, 0), (Key::Num2, 1)] {
             if ctrl && pressed(ctx, key) {
                 let list = gc_core::drives();
                 let sel = list.iter().position(|d| self.panels[panel].cwd.starts_with(d)).unwrap_or(0);
                 self.dialog = Some(Dialog::Drives { panel, list, sel });
+            }
+        }
+    }
+
+    /// Right-click requests raised by the panels while drawing.
+    fn handle_panel_actions(&mut self, frame: &eframe::Frame) {
+        for i in 0..2 {
+            match self.panels[i].action.take() {
+                Some(PanelAction::ShellMenu(paths)) => {
+                    self.active = i;
+                    self.status = match window_handle(frame) {
+                        Some(hwnd) => shell_menu::show(hwnd, &paths).err().map(|e| format!("Context menu failed: {e}")),
+                        None => Some("Context menu failed: no window handle.".into()),
+                    };
+                    // The menu may have deleted, renamed or created items.
+                    self.reload_all();
+                }
+                Some(PanelAction::Extract) => {
+                    self.active = i;
+                    self.open_dialog_for(Key::F5, false);
+                }
+                None => {}
             }
         }
     }
@@ -361,7 +388,11 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        gc_archive::cleanup_nested();
+    }
+
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         let dialog_open = self.dialog.is_some() || self.about.open || self.themes.open || self.jobs.iter().any(|j| j.job.progress.pending_conflict().is_some());
         if !dialog_open {
             self.handle_keys(ctx);
@@ -374,7 +405,7 @@ impl eframe::App for App {
             }
             self.show_jobs(ui);
             ui.horizontal(|ui| {
-                for (key, label) in [("F5", "Copy"), ("F6", "Move"), ("F7", "MkDir"), ("F8", "Recycle"), ("Shift+F8", "Delete")] {
+                for (key, label) in [("F5", "Copy"), ("F6", "Move"), ("F7", "MkDir"), ("F8/Del", "Recycle"), ("Shift+F8/Del", "Delete")] {
                     ui.monospace(format!("{key} {label}"));
                     ui.add_space(12.0);
                 }
@@ -403,6 +434,7 @@ impl eframe::App for App {
         if let Some(i) = clicked {
             self.active = i;
         }
+        self.handle_panel_actions(frame);
 
         self.show_dialog(ctx);
         self.show_conflict(ctx);
@@ -424,6 +456,15 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
     eframe::run_native("Ghost Commander", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
+}
+
+/// Win32 handle of the main window, needed to own the shell context menu.
+fn window_handle(frame: &eframe::Frame) -> Option<isize> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match frame.window_handle().ok()?.as_raw() {
+        RawWindowHandle::Win32(h) => Some(h.hwnd.get()),
+        _ => None,
+    }
 }
 
 /// Registers the Phosphor icon font so file-type icons render as text glyphs.
