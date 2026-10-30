@@ -52,14 +52,14 @@ TBD (no code yet). Will be `cargo run --release`.
 
 ## Current state
 
-M0 and M1 are built: dual panes, keyboard navigation (arrows, PgUp/PgDn, Home/End, Tab, Enter, Backspace, Space/Insert to mark), F5 copy, F6 move, F7 new folder, F8 delete (permanent), all file operations as cancellable background jobs with progress. Copy never overwrites; a name conflict is reported as an error.
+M0 and M1 are built: dual panes, keyboard navigation (arrows, PgUp/PgDn, Home/End, Tab, Enter, Backspace, Space/Insert to mark), F5 copy, F6 move, F7 new folder, F8 delete to the recycle bin (Shift+F8 permanent), Ctrl+1/Ctrl+2 drive picker, date column. All file operations are cancellable background jobs with progress. Name conflicts open a dialog (overwrite / skip / rename / cancel, optionally for all remaining).
 
 Run: `cargo run --release` (binary `ghost-commander`). Test: `cargo test`.
 
 ## TODO (backlog)
 
 **M1 gaps**
-- Conflict dialog (overwrite / skip / rename / apply to all), recycle-bin delete (`trash` crate), date column, drive list, sort columns.
+- Sortable columns (name, size, date), quick filter.
 
 **Performance: caching and acceleration everywhere possible**
 - Cache directory listings (keyed by path + change notification via `ReadDirectoryChangesW`), incremental refresh instead of full re-read.

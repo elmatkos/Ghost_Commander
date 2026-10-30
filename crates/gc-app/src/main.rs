@@ -5,12 +5,14 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use eframe::egui::{self, Key};
-use gc_core::jobs::{self, Job, Op};
+use gc_core::jobs::{self, Job, Op, Resolution};
 use panel::Panel;
 
 enum Dialog {
     Confirm(Op),
     MkDir(String),
+    /// Drive picker for panel `panel`.
+    Drives { panel: usize, list: Vec<PathBuf>, sel: usize },
 }
 
 struct RunningJob {
@@ -25,6 +27,8 @@ struct App {
     dialog: Option<Dialog>,
     jobs: Vec<RunningJob>,
     status: Option<String>,
+    /// "Apply to all" checkbox state of the conflict dialog.
+    apply_all: bool,
 }
 
 impl App {
@@ -36,6 +40,7 @@ impl App {
             dialog: None,
             jobs: Vec::new(),
             status: None,
+            apply_all: false,
         }
     }
 
@@ -49,13 +54,13 @@ impl App {
         self.jobs.push(RunningJob { job: jobs::spawn(op), refreshed: false });
     }
 
-    fn open_dialog_for(&mut self, key: Key) {
+    fn open_dialog_for(&mut self, key: Key, shift: bool) {
         let srcs = self.panels[self.active].targets();
         let dest_dir = self.panels[1 - self.active].cwd.clone();
         self.dialog = match key {
             Key::F5 if !srcs.is_empty() => Some(Dialog::Confirm(Op::Copy { srcs, dest_dir })),
             Key::F6 if !srcs.is_empty() => Some(Dialog::Confirm(Op::Move { srcs, dest_dir })),
-            Key::F8 if !srcs.is_empty() => Some(Dialog::Confirm(Op::Delete { srcs })),
+            Key::F8 if !srcs.is_empty() => Some(Dialog::Confirm(Op::Delete { srcs, permanent: shift })),
             Key::F7 => Some(Dialog::MkDir(String::new())),
             _ => None,
         };
@@ -94,9 +99,18 @@ impl App {
         if pressed(ctx, Key::Tab) {
             self.active = 1 - self.active;
         }
+        let shift = ctx.input(|i| i.modifiers.shift);
         for key in [Key::F5, Key::F6, Key::F7, Key::F8] {
             if pressed(ctx, key) {
-                self.open_dialog_for(key);
+                self.open_dialog_for(key, shift);
+            }
+        }
+        let ctrl = ctx.input(|i| i.modifiers.ctrl);
+        for (key, panel) in [(Key::Num1, 0), (Key::Num2, 1)] {
+            if ctrl && pressed(ctx, key) {
+                let list = gc_core::drives();
+                let sel = list.iter().position(|d| self.panels[panel].cwd.starts_with(d)).unwrap_or(0);
+                self.dialog = Some(Dialog::Drives { panel, list, sel });
             }
         }
     }
@@ -114,7 +128,8 @@ impl App {
                 let text = match &op {
                     Op::Copy { srcs, dest_dir } => format!("Copy {} item(s) to\n{}", srcs.len(), dest_dir.display()),
                     Op::Move { srcs, dest_dir } => format!("Move {} item(s) to\n{}", srcs.len(), dest_dir.display()),
-                    Op::Delete { srcs } => format!("Permanently delete {} item(s)?", srcs.len()),
+                    Op::Delete { srcs, permanent: true } => format!("Permanently delete {} item(s)?\nThis cannot be undone.", srcs.len()),
+                    Op::Delete { srcs, permanent: false } => format!("Move {} item(s) to the recycle bin?", srcs.len()),
                 };
                 let mut ok = enter;
                 let mut cancel = escape;
@@ -147,6 +162,33 @@ impl App {
                     keep = Some(Dialog::MkDir(name));
                 }
             }
+            Dialog::Drives { panel, list, mut sel } => {
+                let (down, up) = ctx.input(|i| (i.key_pressed(Key::ArrowDown), i.key_pressed(Key::ArrowUp)));
+                if down {
+                    sel = (sel + 1).min(list.len().saturating_sub(1));
+                }
+                if up {
+                    sel = sel.saturating_sub(1);
+                }
+                let mut chosen = enter.then_some(sel);
+                egui::Window::new(format!("Drive for {} panel", if panel == 0 { "left" } else { "right" }))
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(ctx, |ui| {
+                        for (i, d) in list.iter().enumerate() {
+                            if ui.selectable_label(i == sel, d.display().to_string()).clicked() {
+                                chosen = Some(i);
+                            }
+                        }
+                    });
+                if let Some(i) = chosen {
+                    self.panels[panel].open_root(list[i].clone());
+                    self.active = panel;
+                } else if !escape {
+                    keep = Some(Dialog::Drives { panel, list, sel });
+                }
+            }
         }
 
         self.dialog = keep;
@@ -162,6 +204,47 @@ impl App {
                 Err(e) => self.status = Some(format!("Create folder failed: {e}")),
             }
         }
+    }
+
+    /// Shows the name-conflict dialog for the first job waiting on an answer.
+    /// Returns true while a conflict is open (keyboard goes to the dialog).
+    fn show_conflict(&mut self, ctx: &egui::Context) -> bool {
+        let Some((progress, target)) = self
+            .jobs
+            .iter()
+            .find_map(|j| j.job.progress.pending_conflict().map(|t| (j.job.progress.clone(), t)))
+        else {
+            return false;
+        };
+        let mut answer: Option<Resolution> = None;
+        egui::Window::new("File exists").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+            ui.label(format!("{}\nalready exists.", target.display()));
+            ui.checkbox(&mut self.apply_all, "Apply to all remaining conflicts");
+            ui.horizontal(|ui| {
+                if ui.button("Overwrite (O)").clicked() {
+                    answer = Some(Resolution::Overwrite);
+                }
+                if ui.button("Skip (S)").clicked() {
+                    answer = Some(Resolution::Skip);
+                }
+                if ui.button("Rename (R)").clicked() {
+                    answer = Some(Resolution::Rename);
+                }
+                if ui.button("Cancel (Esc)").clicked() {
+                    answer = Some(Resolution::Cancel);
+                }
+            });
+        });
+        for (key, res) in [(Key::O, Resolution::Overwrite), (Key::S, Resolution::Skip), (Key::R, Resolution::Rename), (Key::Escape, Resolution::Cancel)] {
+            if ctx.input(|i| i.key_pressed(key)) {
+                answer = Some(res);
+            }
+        }
+        if let Some(res) = answer {
+            progress.resolve(res, self.apply_all);
+            self.apply_all = false;
+        }
+        true
     }
 
     fn poll_jobs(&mut self) {
@@ -213,7 +296,7 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let dialog_open = self.dialog.is_some();
+        let dialog_open = self.dialog.is_some() || self.jobs.iter().any(|j| j.job.progress.pending_conflict().is_some());
         if !dialog_open {
             self.handle_keys(ctx);
         }
@@ -225,11 +308,11 @@ impl eframe::App for App {
             }
             self.show_jobs(ui);
             ui.horizontal(|ui| {
-                for (key, label) in [("F5", "Copy"), ("F6", "Move"), ("F7", "MkDir"), ("F8", "Delete")] {
+                for (key, label) in [("F5", "Copy"), ("F6", "Move"), ("F7", "MkDir"), ("F8", "Recycle"), ("Shift+F8", "Delete")] {
                     ui.monospace(format!("{key} {label}"));
                     ui.add_space(12.0);
                 }
-                ui.monospace("Tab switch | Space mark | Bksp up");
+                ui.monospace("Tab switch | Space mark | Bksp up | Ctrl+1/2 drive");
             });
         });
 
@@ -248,6 +331,7 @@ impl eframe::App for App {
         }
 
         self.show_dialog(ctx);
+        self.show_conflict(ctx);
 
         if self.jobs.iter().any(|j| !j.job.progress.finished.load(Ordering::Acquire)) {
             ctx.request_repaint_after(Duration::from_millis(50));

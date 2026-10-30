@@ -89,6 +89,11 @@ impl Panel {
         }
     }
 
+    /// Switches to another root (e.g. a drive).
+    pub fn open_root(&mut self, path: PathBuf) {
+        self.go_to(path, None);
+    }
+
     pub fn go_up(&mut self) {
         if let Some(parent) = self.cwd.parent().map(|p| p.to_path_buf()) {
             let came_from = self.cwd.file_name().map(|n| n.to_string_lossy().into_owned());
@@ -186,8 +191,13 @@ impl Panel {
                 let font = FontId::monospace(13.0);
                 let name = if e.is_dir { format!("[{}]", e.name) } else { e.name.clone() };
                 painter.text(rect.left_center() + egui::vec2(6.0, 0.0), Align2::LEFT_CENTER, name, font.clone(), color);
+                let right = rect.right_center() - egui::vec2(6.0, 0.0);
+                if let Some(t) = e.modified {
+                    let date = chrono::DateTime::<chrono::Local>::from(t).format("%Y-%m-%d %H:%M").to_string();
+                    painter.text(right, Align2::RIGHT_CENTER, date, font.clone(), color);
+                }
                 let size = if e.is_dir { "<DIR>".to_owned() } else { fmt_size(e.size) };
-                painter.text(rect.right_center() - egui::vec2(6.0, 0.0), Align2::RIGHT_CENTER, size, font, color);
+                painter.text(right - egui::vec2(DATE_COL_W, 0.0), Align2::RIGHT_CENTER, size, font, color);
             }
         });
         self.last_offset = out.state.offset.y;
@@ -197,6 +207,8 @@ impl Panel {
 }
 
 const ROW_H: f32 = 20.0;
+/// Width reserved for the "YYYY-MM-DD HH:MM" column plus a gap.
+const DATE_COL_W: f32 = 140.0;
 
 fn fmt_size(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];

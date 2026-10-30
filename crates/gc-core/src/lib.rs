@@ -40,6 +40,22 @@ pub fn list_dir(dir: &Path) -> io::Result<Vec<Entry>> {
     Ok(entries)
 }
 
+/// Root paths of the available drives (`C:\`, `D:\`, ...); `/` on non-Windows systems.
+#[cfg(windows)]
+pub fn drives() -> Vec<PathBuf> {
+    // SAFETY: GetLogicalDrives takes no arguments and only returns a bitmask.
+    let mask = unsafe { windows_sys::Win32::Storage::FileSystem::GetLogicalDrives() };
+    (0..26u8)
+        .filter(|i| mask & (1 << i) != 0)
+        .map(|i| PathBuf::from(format!("{}:\\", (b'A' + i) as char)))
+        .collect()
+}
+
+#[cfg(not(windows))]
+pub fn drives() -> Vec<PathBuf> {
+    vec![PathBuf::from("/")]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

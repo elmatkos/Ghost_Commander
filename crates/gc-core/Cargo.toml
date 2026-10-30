@@ -2,3 +2,9 @@
 name = "gc-core"
 version.workspace = true
 edition.workspace = true
+
+[dependencies]
+trash = "5"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
