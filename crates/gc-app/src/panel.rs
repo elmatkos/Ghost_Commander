@@ -305,6 +305,30 @@ impl Panel {
         (self.archive.is_none() && !e.is_dir && e.name != PARENT).then(|| e.path.clone())
     }
 
+    /// Images of the shown folder in listing order, for browsing in the image viewer.
+    pub fn image_files(&self) -> Vec<PathBuf> {
+        let on_disk = self.archive.is_none();
+        self.entries.iter().filter(|e| on_disk && !e.is_dir && crate::image_viewer::is_image(&e.path)).map(|e| e.path.clone()).collect()
+    }
+
+    /// Puts the cursor on `path` if it is listed.
+    pub fn select_path(&mut self, path: &Path) {
+        if let Some(i) = self.entries.iter().position(|e| e.path == path) {
+            self.cursor = i;
+            self.scroll_to_cursor = true;
+        }
+    }
+
+    /// Name for a new archive made from the targets: the single item's name, else the folder's.
+    pub fn pack_name(&self) -> String {
+        let targets = self.targets();
+        let source = match targets.as_slice() {
+            [one] => one.file_stem().or_else(|| one.file_name()),
+            _ => self.cwd.file_name(),
+        };
+        source.map_or_else(|| "archive".to_owned(), |n| n.to_string_lossy().into_owned())
+    }
+
     /// Marked entries, or the one under the cursor when nothing is marked.
     pub fn targets(&self) -> Vec<PathBuf> {
         if self.marked.is_empty() {

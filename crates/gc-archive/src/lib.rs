@@ -272,6 +272,162 @@ pub fn cleanup_nested() {
     let _ = fs::remove_dir_all(nested_root());
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackFormat {
+    Zip,
+    SevenZip,
+}
+
+impl PackFormat {
+    pub const ALL: [PackFormat; 2] = [PackFormat::Zip, PackFormat::SevenZip];
+
+    pub fn extension(self) -> &'static str {
+        match self {
+            PackFormat::Zip => "zip",
+            PackFormat::SevenZip => "7z",
+        }
+    }
+}
+
+/// One file or folder to pack; `name` is its `/` path inside the archive.
+struct PackItem {
+    path: PathBuf,
+    name: String,
+    is_dir: bool,
+    size: u64,
+}
+
+/// Lists `path` and everything below it. Symlinks are skipped; unreadable folders are reported.
+fn walk(path: &Path, name: String, out: &mut Vec<PackItem>, p: &Progress) {
+    let meta = match fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) => return p.fail(format!("{}: {e}", path.display())),
+    };
+    if meta.file_type().is_symlink() {
+        return;
+    }
+    if !meta.is_dir() {
+        out.push(PackItem { path: path.to_path_buf(), name, is_dir: false, size: meta.len() });
+        return;
+    }
+    out.push(PackItem { path: path.to_path_buf(), name: name.clone(), is_dir: true, size: 0 });
+    match fs::read_dir(path) {
+        Ok(children) => {
+            for child in children.flatten() {
+                let child_name = format!("{name}/{}", child.file_name().to_string_lossy());
+                walk(&child.path(), child_name, out, p);
+            }
+        }
+        Err(e) => p.fail(format!("{}: {e}", path.display())),
+    }
+}
+
+/// Counts bytes into the progress and aborts the read when the job is cancelled.
+struct CountingReader<'a, R> {
+    inner: R,
+    p: &'a Progress,
+}
+
+impl<R: io::Read> io::Read for CountingReader<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.p.cancelled() {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+        }
+        let n = self.inner.read(buf)?;
+        self.p.done.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+        Ok(n)
+    }
+}
+
+fn zip_datetime(t: SystemTime) -> Option<zip::DateTime> {
+    use chrono::{DateTime, Datelike, Local, Timelike};
+    let t = DateTime::<Local>::from(t);
+    zip::DateTime::from_date_and_time(u16::try_from(t.year()).ok()?, t.month() as u8, t.day() as u8, t.hour() as u8, t.minute() as u8, t.second() as u8).ok()
+}
+
+/// Packs `srcs` (files or folders, kept by name) into the new archive `dest`.
+/// The partial file is removed when the job fails or is cancelled.
+pub fn pack(format: PackFormat, srcs: &[PathBuf], dest: &Path, p: &Progress) {
+    let mut items = Vec::new();
+    for src in srcs {
+        let name = src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        walk(src, name, &mut items, p);
+    }
+    p.total.store(items.iter().map(|i| i.size).sum(), std::sync::atomic::Ordering::Relaxed);
+    let result = match format {
+        PackFormat::Zip => pack_zip(&items, dest, p),
+        PackFormat::SevenZip => pack_7z(&items, dest, p),
+    };
+    if let Err(e) = result {
+        if e.kind() != io::ErrorKind::Interrupted {
+            p.fail(format!("{}: {e}", dest.display()));
+        }
+    }
+    if p.cancelled() || !p.errors().is_empty() && !dest.exists() {
+        let _ = fs::remove_file(dest);
+    }
+}
+
+fn pack_zip(items: &[PackItem], dest: &Path, p: &Progress) -> io::Result<()> {
+    let mut w = zip::ZipWriter::new(io::BufWriter::new(fs::OpenOptions::new().write(true).create_new(true).open(dest)?));
+    for item in items {
+        if p.cancelled() {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+        }
+        let mut options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated).large_file(item.size >= u32::MAX as u64);
+        if let Some(t) = fs::metadata(&item.path).and_then(|m| m.modified()).ok().and_then(zip_datetime) {
+            options = options.last_modified_time(t);
+        }
+        if item.is_dir {
+            w.add_directory(&item.name, options).map_err(io::Error::other)?;
+            continue;
+        }
+        let file = match File::open(&item.path) {
+            Ok(f) => f,
+            Err(e) => {
+                p.fail(format!("{}: {e}", item.path.display()));
+                continue;
+            }
+        };
+        w.start_file(&item.name, options).map_err(io::Error::other)?;
+        io::copy(&mut CountingReader { inner: file, p }, &mut w)?;
+    }
+    w.finish().map_err(io::Error::other)?;
+    Ok(())
+}
+
+fn pack_7z(items: &[PackItem], dest: &Path, p: &Progress) -> io::Result<()> {
+    // `create` would silently replace an existing file.
+    drop(fs::OpenOptions::new().write(true).create_new(true).open(dest)?);
+    let mut w = sevenz_rust2::ArchiveWriter::create(dest).map_err(|e| io::Error::other(e.to_string()))?;
+    for item in items {
+        if p.cancelled() {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+        }
+        let entry = sevenz_rust2::ArchiveEntry::from_path(&item.path, item.name.clone());
+        let reader = if item.is_dir {
+            None
+        } else {
+            match File::open(&item.path) {
+                Ok(f) => Some(CountingReader { inner: f, p }),
+                Err(e) => {
+                    p.fail(format!("{}: {e}", item.path.display()));
+                    continue;
+                }
+            }
+        };
+        w.push_archive_entry(entry, reader).map_err(|e| io::Error::other(e.to_string()))?;
+    }
+    w.finish()?;
+    Ok(())
+}
+
+/// Starts packing on a worker thread.
+pub fn spawn_pack(format: PackFormat, srcs: Vec<PathBuf>, dest: PathBuf) -> Job {
+    let label = format!("Pack {} item(s) to {}", srcs.len(), dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+    jobs::spawn_with(label, move |p| pack(format, &srcs, &dest, p))
+}
+
 /// Starts extraction on a worker thread (progress, cancel and conflict dialog included).
 pub fn spawn_extract(index: std::sync::Arc<ArchiveIndex>, selected: Vec<String>, dest_dir: PathBuf) -> Job {
     let label = format!("Extract {} item(s)", selected.len());
@@ -398,6 +554,48 @@ mod tests {
         assert_eq!(fs::read_to_string(find(&dest, "c.txt").unwrap()).unwrap(), "C");
         assert_eq!(fs::read_to_string(find(&dest, "a.txt").unwrap()).unwrap(), "A");
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn pack_round_trip(format: PackFormat) {
+        let dir = scratch(&format!("pack_{}", format.extension()));
+        let src = dir.join("proj");
+        fs::create_dir_all(src.join("sub/empty")).unwrap();
+        fs::write(src.join("a.txt"), "A").unwrap();
+        fs::write(src.join("sub/b.txt"), "B").unwrap();
+        fs::write(dir.join("loose.txt"), "L").unwrap();
+
+        let archive = dir.join(format!("out.{}", format.extension()));
+        let p = Progress::default();
+        pack(format, &[src, dir.join("loose.txt")], &archive, &p);
+        assert!(p.errors().is_empty(), "{:?}", p.errors());
+        assert_eq!(p.done.load(Ordering::Relaxed), 3);
+
+        let idx = open(&archive).unwrap();
+        assert_eq!(names(&idx.list("")), [("proj", true), ("loose.txt", false)]);
+        assert_eq!(names(&idx.list("proj/sub")), [("empty", true), ("b.txt", false)]);
+        let out = dir.join("x");
+        fs::create_dir(&out).unwrap();
+        let p = Progress::default();
+        idx.extract(&["proj".to_owned()], &out, &p);
+        assert!(p.errors().is_empty(), "{:?}", p.errors());
+        assert_eq!(fs::read_to_string(out.join("proj/sub/b.txt")).unwrap(), "B");
+
+        // An existing archive is never overwritten.
+        let p = Progress::default();
+        pack(format, &[dir.join("loose.txt")], &archive, &p);
+        assert!(!p.errors().is_empty());
+        assert_eq!(open(&archive).unwrap().list("").len(), 2);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn pack_zip_round_trips() {
+        pack_round_trip(PackFormat::Zip);
+    }
+
+    #[test]
+    fn pack_7z_round_trips() {
+        pack_round_trip(PackFormat::SevenZip);
     }
 
     #[test]

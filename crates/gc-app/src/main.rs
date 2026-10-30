@@ -17,7 +17,7 @@ use std::time::Duration;
 use eframe::egui::{self, Key};
 use gc_core::jobs::{self, Job, Op, Resolution};
 use about::About;
-use gc_archive::ArchiveIndex;
+use gc_archive::{ArchiveIndex, PackFormat};
 use panel::{Panel, PanelAction};
 use theme_editor::ThemeManager;
 use image_viewer::ImageViewer;
@@ -30,6 +30,8 @@ enum Dialog {
     Drives { panel: usize, list: Vec<PathBuf>, sel: usize },
     /// Extract inner paths of an archive into a folder.
     Extract { index: Arc<ArchiveIndex>, names: Vec<String>, dest: PathBuf },
+    /// Pack items into a new archive `name.ext` in `dest_dir`.
+    Pack { srcs: Vec<PathBuf>, dest_dir: PathBuf, name: String, format: PackFormat },
 }
 
 struct RunningJob {
@@ -84,7 +86,7 @@ impl App {
             let editor = "xdg-open";
             std::process::Command::new(editor).arg(&file).spawn().map(|_| ())
         } else if image_viewer::is_image(&file) {
-            self.images.open(ctx, &file);
+            self.images.open(ctx, &file, self.panels[self.active].image_files());
             Ok(())
         } else {
             self.viewer.open(&file)
@@ -125,13 +127,26 @@ impl App {
             (Key::F5, Some(dest_dir)) if !srcs.is_empty() => Some(Dialog::Confirm(Op::Copy { srcs, dest_dir })),
             (Key::F6, Some(dest_dir)) if !srcs.is_empty() => Some(Dialog::Confirm(Op::Move { srcs, dest_dir })),
             (Key::F5 | Key::F6, None) => {
-                self.status = Some("Packing into archives is not supported yet.".into());
+                self.status = Some("Archives are read-only here; Alt+F5 packs into a new archive.".into());
                 None
             }
             (Key::F8, _) if !srcs.is_empty() => Some(Dialog::Confirm(Op::Delete { srcs, permanent: shift })),
             (Key::F7, _) => Some(Dialog::MkDir(String::new())),
             _ => None,
         };
+    }
+
+    /// Alt+F5: pack the selection into a new archive in the other panel's folder (or this one's).
+    fn open_pack_dialog(&mut self) {
+        let panel = &self.panels[self.active];
+        let srcs = panel.targets();
+        let dest_dir = self.panels[1 - self.active].disk_folder().or_else(|| panel.disk_folder()).map(Path::to_path_buf);
+        match dest_dir {
+            Some(dest_dir) if panel.disk_folder().is_some() && !srcs.is_empty() => {
+                self.dialog = Some(Dialog::Pack { srcs, dest_dir, name: panel.pack_name(), format: PackFormat::SevenZip });
+            }
+            _ => self.status = Some("Select files or folders on disk to pack.".into()),
+        }
     }
 
     fn handle_keys(&mut self, ctx: &egui::Context) {
@@ -175,9 +190,14 @@ impl App {
             self.themes.open = true;
         }
         let shift = ctx.input(|i| i.modifiers.shift);
+        let alt = ctx.input(|i| i.modifiers.alt);
         for key in [Key::F5, Key::F6, Key::F7, Key::F8] {
             if pressed(ctx, key) {
-                self.open_dialog_for(key, shift);
+                if alt && key == Key::F5 {
+                    self.open_pack_dialog();
+                } else {
+                    self.open_dialog_for(key, shift);
+                }
             }
         }
         // Del / Shift+Del behave like F8 / Shift+F8. egui turns Shift+Del into a Cut event
@@ -232,7 +252,7 @@ impl App {
         let mut keep: Option<Dialog> = None;
         let mut run: Option<Op> = None;
         let mut mkdir: Option<String> = None;
-        let mut extract: Option<Job> = None;
+        let mut spawned: Option<Job> = None;
 
         match dialog {
             Dialog::Confirm(op) => {
@@ -268,9 +288,43 @@ impl App {
                     });
                 });
                 if ok {
-                    extract = Some(gc_archive::spawn_extract(index, names, dest));
+                    spawned = Some(gc_archive::spawn_extract(index, names, dest));
                 } else if !cancel {
                     keep = Some(Dialog::Extract { index, names, dest });
+                }
+            }
+            Dialog::Pack { srcs, dest_dir, mut name, mut format } => {
+                let target = dest_dir.join(format!("{}.{}", name.trim(), format.extension()));
+                let problem = if name.trim().is_empty() || name.contains(['\\', '/', ':']) {
+                    Some("Enter a plain file name.")
+                } else if target.exists() {
+                    Some("That archive already exists.")
+                } else {
+                    None
+                };
+                let mut ok = enter && problem.is_none();
+                let mut cancel = escape;
+                egui::Window::new("Pack").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+                    ui.label(format!("Pack {} item(s) into", srcs.len()));
+                    ui.add(egui::TextEdit::singleline(&mut name)).request_focus();
+                    ui.horizontal(|ui| {
+                        for f in PackFormat::ALL {
+                            ui.radio_value(&mut format, f, f.extension());
+                        }
+                    });
+                    ui.label(target.display().to_string());
+                    if let Some(p) = problem {
+                        ui.colored_label(self.themes.active.error.0, p);
+                    }
+                    ui.horizontal(|ui| {
+                        ok |= ui.add_enabled(problem.is_none(), egui::Button::new("Pack (Enter)")).clicked();
+                        cancel |= ui.button("Cancel (Esc)").clicked();
+                    });
+                });
+                if ok {
+                    spawned = Some(gc_archive::spawn_pack(format, srcs, target));
+                } else if !cancel {
+                    keep = Some(Dialog::Pack { srcs, dest_dir, name, format });
                 }
             }
             Dialog::MkDir(mut name) => {
@@ -322,7 +376,7 @@ impl App {
         if let Some(op) = run {
             self.start_job(op);
         }
-        if let Some(job) = extract {
+        if let Some(job) = spawned {
             self.jobs.push(RunningJob { job, refreshed: false });
         }
         if let Some(name) = mkdir {
@@ -447,7 +501,7 @@ impl eframe::App for App {
             }
             self.show_jobs(ui);
             ui.horizontal(|ui| {
-                for (key, label) in [("F3", "View"), ("F4", "Edit"), ("F5", "Copy"),("F6", "Move"), ("F7", "MkDir"), ("F8/Del", "Recycle"), ("Shift+F8/Del", "Delete")] {
+                for (key, label) in [("F3", "View"), ("F4", "Edit"), ("F5", "Copy"), ("F6", "Move"), ("Alt+F5", "Pack"), ("F7", "MkDir"), ("F8/Del", "Recycle"), ("Shift+F8/Del", "Delete")] {
                     ui.monospace(format!("{key} {label}"));
                     ui.add_space(12.0);
                 }
@@ -485,6 +539,9 @@ impl eframe::App for App {
         self.viewer.show(ctx);
         if let Some(err) = self.images.show(ctx) {
             self.status = Some(err);
+        }
+        if let Some(path) = self.images.take_moved() {
+            self.panels[self.active].select_path(&path);
         }
 
         if self.jobs.iter().any(|j| !j.job.progress.finished.load(Ordering::Acquire)) {
