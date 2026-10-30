@@ -49,3 +49,28 @@ Ghost_Commander/
 ## How to run
 
 TBD (no code yet). Will be `cargo run --release`.
+
+## Current state
+
+M0 and M1 are built: dual panes, keyboard navigation (arrows, PgUp/PgDn, Home/End, Tab, Enter, Backspace, Space/Insert to mark), F5 copy, F6 move, F7 new folder, F8 delete (permanent), all file operations as cancellable background jobs with progress. Copy never overwrites; a name conflict is reported as an error.
+
+Run: `cargo run --release` (binary `ghost-commander`). Test: `cargo test`.
+
+## TODO (backlog)
+
+**M1 gaps**
+- Conflict dialog (overwrite / skip / rename / apply to all), recycle-bin delete (`trash` crate), date column, drive list, sort columns.
+
+**Performance: caching and acceleration everywhere possible**
+- Cache directory listings (keyed by path + change notification via `ReadDirectoryChangesW`), incremental refresh instead of full re-read.
+- Cache icons, thumbnails and decoded images (LRU, optional on-disk thumbnail cache).
+- Cache archive indexes (central directories) so reopening an archive is instant.
+- Use modern CPU features wherever it pays off, with runtime detection and scalar fallback: AVX2/AVX-512 for search and compare, SHA-NI and PCLMULQDQ/CRC32 instructions for hashing, AES-NI, SIMD image resize/decode, BMI2. Applies to core and to every later feature (archives, hashing, compare, search).
+- Parallelism: rayon for hashing, search, directory sizing; large-file copy with unbuffered/overlapped I/O; NTFS MFT/USN fast search.
+- Measure first: benchmark suite (`criterion`) before and after each optimization.
+
+**System info (like EFI Commander)**
+- Built-in system information view: CPU (brand, features, caches), memory, SMBIOS tables, disks, firmware/Secure Boot state, displays.
+
+**Release**
+- Sign the binary and installer once a code-signing certificate is obtained (signtool + timestamping, CI step).
