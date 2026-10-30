@@ -56,6 +56,8 @@ M0 and M1 are built: dual panes, keyboard navigation (arrows, PgUp/PgDn, Home/En
 
 Run: `cargo run --release` (binary `ghost-commander`). Test: `cargo test`.
 
+Branding lives in `assets/` (`icon.ico` is embedded into the exe by `crates/gc-app/build.rs`, `logo_512.png` is shown in the About window, F1).
+
 ## TODO (backlog)
 
 **M1 gaps**

@@ -1,6 +1,7 @@
 // GUI subsystem: no console window next to the app (also in debug builds).
 #![windows_subsystem = "windows"]
 
+mod about;
 mod panel;
 
 use std::path::PathBuf;
@@ -9,6 +10,7 @@ use std::time::Duration;
 
 use eframe::egui::{self, Key};
 use gc_core::jobs::{self, Job, Op, Resolution};
+use about::About;
 use panel::Panel;
 
 enum Dialog {
@@ -32,6 +34,7 @@ struct App {
     status: Option<String>,
     /// "Apply to all" checkbox state of the conflict dialog.
     apply_all: bool,
+    about: About,
 }
 
 impl App {
@@ -44,6 +47,7 @@ impl App {
             jobs: Vec::new(),
             status: None,
             apply_all: false,
+            about: About::default(),
         }
     }
 
@@ -101,6 +105,9 @@ impl App {
         }
         if pressed(ctx, Key::Tab) {
             self.active = 1 - self.active;
+        }
+        if pressed(ctx, Key::F1) {
+            self.about.open = true;
         }
         let shift = ctx.input(|i| i.modifiers.shift);
         for key in [Key::F5, Key::F6, Key::F7, Key::F8] {
@@ -299,7 +306,7 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let dialog_open = self.dialog.is_some() || self.jobs.iter().any(|j| j.job.progress.pending_conflict().is_some());
+        let dialog_open = self.dialog.is_some() || self.about.open || self.jobs.iter().any(|j| j.job.progress.pending_conflict().is_some());
         if !dialog_open {
             self.handle_keys(ctx);
         }
@@ -316,6 +323,11 @@ impl eframe::App for App {
                     ui.add_space(12.0);
                 }
                 ui.monospace("Tab switch | Space mark | Bksp up | Ctrl+1/2 drive");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("About (F1)").clicked() {
+                        self.about.open = true;
+                    }
+                });
             });
         });
 
@@ -335,6 +347,7 @@ impl eframe::App for App {
 
         self.show_dialog(ctx);
         self.show_conflict(ctx);
+        self.about.show(ctx);
 
         if self.jobs.iter().any(|j| !j.job.progress.finished.load(Ordering::Acquire)) {
             ctx.request_repaint_after(Duration::from_millis(50));
@@ -346,6 +359,7 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Ghost Commander")
+            .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icon_256.png")).expect("embedded icon is a valid PNG"))
             .with_inner_size([1200.0, 700.0]),
         ..Default::default()
     };
