@@ -1,0 +1,10 @@
+[package]
+name = "gc-archive"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+gc-core = { path = "../gc-core" }
+sevenz-rust2 = "0.24.2"
+zip = { version = "9.1.3", default-features = false, features = ["deflate"] }

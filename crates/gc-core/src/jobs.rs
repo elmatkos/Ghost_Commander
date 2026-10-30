@@ -72,11 +72,11 @@ impl Progress {
         self.answered.notify_all();
     }
 
-    fn fail(&self, msg: String) {
+    pub fn fail(&self, msg: String) {
         self.errors.lock().unwrap().push(msg);
     }
 
-    fn cancelled(&self) -> bool {
+    pub fn cancelled(&self) -> bool {
         self.cancel.load(Ordering::Relaxed)
     }
 
@@ -114,10 +114,16 @@ pub struct Job {
 
 /// Starts the operation on a worker thread.
 pub fn spawn(op: Op) -> Job {
+    let label = op.label();
+    spawn_with(label, move |p| run(&op, p))
+}
+
+/// Starts any work on a worker thread with the same progress / cancel / conflict plumbing.
+pub fn spawn_with(label: String, work: impl FnOnce(&Progress) + Send + 'static) -> Job {
     let progress = Arc::new(Progress::default());
-    let job = Job { label: op.label(), progress: progress.clone() };
+    let job = Job { label, progress: progress.clone() };
     thread::spawn(move || {
-        run(&op, &progress);
+        work(&progress);
         progress.finished.store(true, Ordering::Release);
     });
     job
@@ -187,9 +193,20 @@ fn copy_tree(src: &Path, dst: &Path, p: &Progress) -> io::Result<()> {
     }
 }
 
-/// Existing targets are resolved through `Progress::ask_conflict`.
 fn copy_file(src: &Path, dst: &Path, p: &Progress) -> io::Result<()> {
     let mut input = File::open(src)?;
+    let size = input.metadata()?.len();
+    if let Some(written) = copy_stream(&mut input, size, dst, p)? {
+        if let Ok(meta) = fs::metadata(src) {
+            let _ = fs::set_permissions(&written, meta.permissions());
+        }
+    }
+    Ok(())
+}
+
+/// Writes `input` (`size` bytes) to `dst`; an existing target goes through the conflict dialog.
+/// Returns the path actually written, or `None` when the file was skipped or the job cancelled.
+pub fn copy_stream(input: &mut dyn Read, size: u64, dst: &Path, p: &Progress) -> io::Result<Option<PathBuf>> {
     let mut target = dst.to_path_buf();
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -198,10 +215,10 @@ fn copy_file(src: &Path, dst: &Path, p: &Progress) -> io::Result<()> {
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists && !target.is_dir() => {
             match p.ask_conflict(&target) {
                 Resolution::Skip => {
-                    p.done.fetch_add(input.metadata()?.len(), Ordering::Relaxed);
-                    return Ok(());
+                    p.done.fetch_add(size, Ordering::Relaxed);
+                    return Ok(None);
                 }
-                Resolution::Cancel => return Ok(()),
+                Resolution::Cancel => return Ok(None),
                 Resolution::Overwrite => OpenOptions::new().write(true).create(true).truncate(true).open(&target)?,
                 Resolution::Rename => {
                     target = unique_name(&target);
@@ -216,7 +233,7 @@ fn copy_file(src: &Path, dst: &Path, p: &Progress) -> io::Result<()> {
         if p.cancelled() {
             drop(output);
             let _ = fs::remove_file(&target);
-            return Ok(());
+            return Ok(None);
         }
         let n = input.read(&mut buf)?;
         if n == 0 {
@@ -226,10 +243,7 @@ fn copy_file(src: &Path, dst: &Path, p: &Progress) -> io::Result<()> {
         p.done.fetch_add(n as u64, Ordering::Relaxed);
     }
     output.flush()?;
-    if let Ok(meta) = fs::metadata(src) {
-        let _ = output.set_permissions(meta.permissions());
-    }
-    Ok(())
+    Ok(Some(target))
 }
 
 /// `name.ext` -> first free `name (2).ext`, `name (3).ext`, ...

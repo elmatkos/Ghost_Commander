@@ -100,3 +100,7 @@ icon = "package"
 [extensions]
 mkv = "video"
 ```
+
+## Archives
+
+Enter on a `.zip` or `.7z` opens it as a folder (browse, `..` leaves it); F5 extracts the marked items (or the one under the cursor) into the other panel's folder, with the same progress, cancel and conflict dialog as file copies. Names that could escape the destination (`..`, drive letters) are never listed or extracted. Archives are read-only for now: packing, tar/gz/rar and nested archives come next.

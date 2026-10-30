@@ -6,13 +6,15 @@ mod panel;
 mod theme;
 mod theme_editor;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use eframe::egui::{self, Key};
 use gc_core::jobs::{self, Job, Op, Resolution};
 use about::About;
+use gc_archive::ArchiveIndex;
 use panel::Panel;
 use theme_editor::ThemeManager;
 
@@ -21,6 +23,8 @@ enum Dialog {
     MkDir(String),
     /// Drive picker for panel `panel`.
     Drives { panel: usize, list: Vec<PathBuf>, sel: usize },
+    /// Extract inner paths of an archive into a folder.
+    Extract { index: Arc<ArchiveIndex>, names: Vec<String>, dest: PathBuf },
 }
 
 struct RunningJob {
@@ -68,13 +72,31 @@ impl App {
     }
 
     fn open_dialog_for(&mut self, key: Key, shift: bool) {
+        let other = 1 - self.active;
+        let dest_dir = self.panels[other].disk_folder().map(Path::to_path_buf);
+
+        // Archive panels are read-only for now; F5 extracts.
+        if let Some((index, names)) = self.panels[self.active].archive_selection() {
+            self.dialog = None;
+            match (key, dest_dir) {
+                (Key::F5, Some(dest)) if !names.is_empty() => self.dialog = Some(Dialog::Extract { index, names, dest }),
+                (Key::F5, None) => self.status = Some("Extract into a normal folder: the other panel shows an archive.".into()),
+                (Key::F6 | Key::F7 | Key::F8, _) => self.status = Some("Archives are read-only for now. F5 extracts.".into()),
+                _ => {}
+            }
+            return;
+        }
+
         let srcs = self.panels[self.active].targets();
-        let dest_dir = self.panels[1 - self.active].cwd.clone();
-        self.dialog = match key {
-            Key::F5 if !srcs.is_empty() => Some(Dialog::Confirm(Op::Copy { srcs, dest_dir })),
-            Key::F6 if !srcs.is_empty() => Some(Dialog::Confirm(Op::Move { srcs, dest_dir })),
-            Key::F8 if !srcs.is_empty() => Some(Dialog::Confirm(Op::Delete { srcs, permanent: shift })),
-            Key::F7 => Some(Dialog::MkDir(String::new())),
+        self.dialog = match (key, dest_dir) {
+            (Key::F5, Some(dest_dir)) if !srcs.is_empty() => Some(Dialog::Confirm(Op::Copy { srcs, dest_dir })),
+            (Key::F6, Some(dest_dir)) if !srcs.is_empty() => Some(Dialog::Confirm(Op::Move { srcs, dest_dir })),
+            (Key::F5 | Key::F6, None) => {
+                self.status = Some("Packing into archives is not supported yet.".into());
+                None
+            }
+            (Key::F8, _) if !srcs.is_empty() => Some(Dialog::Confirm(Op::Delete { srcs, permanent: shift })),
+            (Key::F7, _) => Some(Dialog::MkDir(String::new())),
             _ => None,
         };
     }
@@ -141,6 +163,7 @@ impl App {
         let mut keep: Option<Dialog> = None;
         let mut run: Option<Op> = None;
         let mut mkdir: Option<String> = None;
+        let mut extract: Option<Job> = None;
 
         match dialog {
             Dialog::Confirm(op) => {
@@ -163,6 +186,22 @@ impl App {
                     run = Some(op);
                 } else if !cancel {
                     keep = Some(Dialog::Confirm(op));
+                }
+            }
+            Dialog::Extract { index, names, dest } => {
+                let mut ok = enter;
+                let mut cancel = escape;
+                egui::Window::new("Extract").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+                    ui.label(format!("Extract {} item(s) to\n{}", names.len(), dest.display()));
+                    ui.horizontal(|ui| {
+                        ok |= ui.button("OK (Enter)").clicked();
+                        cancel |= ui.button("Cancel (Esc)").clicked();
+                    });
+                });
+                if ok {
+                    extract = Some(gc_archive::spawn_extract(index, names, dest));
+                } else if !cancel {
+                    keep = Some(Dialog::Extract { index, names, dest });
                 }
             }
             Dialog::MkDir(mut name) => {
@@ -214,8 +253,15 @@ impl App {
         if let Some(op) = run {
             self.start_job(op);
         }
+        if let Some(job) = extract {
+            self.jobs.push(RunningJob { job, refreshed: false });
+        }
         if let Some(name) = mkdir {
-            match jobs::make_dir(&self.panels[self.active].cwd, &name) {
+            let made = match self.panels[self.active].disk_folder() {
+                Some(dir) => jobs::make_dir(dir, &name),
+                None => Err(std::io::Error::other("archives are read-only")),
+            };
+            match made {
                 Ok(_) => {
                     self.status = None;
                     self.reload_all();

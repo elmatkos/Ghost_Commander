@@ -1,13 +1,23 @@
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use eframe::egui::{self, Align2, FontId, Sense, Stroke, StrokeKind};
+use gc_archive::ArchiveIndex;
 use gc_core::{list_dir, Entry};
 
 use crate::theme::Theme;
 
+/// An archive opened as a folder: the panel shows `inner` (a `/` path) of `index`.
+struct ArchiveView {
+    index: Arc<ArchiveIndex>,
+    inner: String,
+}
+
 pub struct Panel {
+    /// Folder on disk; while an archive is open, the archive file itself.
     pub cwd: PathBuf,
+    archive: Option<ArchiveView>,
     entries: Vec<Entry>,
     cursor: usize,
     marked: HashSet<PathBuf>,
@@ -21,6 +31,7 @@ impl Panel {
     pub fn new(cwd: PathBuf) -> Self {
         let mut p = Self {
             cwd,
+            archive: None,
             entries: Vec::new(),
             cursor: 0,
             marked: HashSet::new(),
@@ -36,8 +47,13 @@ impl Panel {
     /// Re-reads the directory and keeps the cursor on the same name when possible.
     pub fn reload(&mut self) {
         let keep = self.entries.get(self.cursor).map(|e| e.name.clone());
-        match list_dir(&self.cwd) {
+        let listing = match &self.archive {
+            Some(a) => Ok(a.index.list(&a.inner)),
+            None => list_dir(&self.cwd),
+        };
+        match listing {
             Ok(mut entries) => {
+                // Inside an archive there is always a way up (to the folder holding it).
                 if let Some(parent) = self.cwd.parent() {
                     entries.insert(
                         0,
@@ -89,16 +105,43 @@ impl Panel {
         self.move_cursor(1);
     }
 
-    /// Enters the directory under the cursor.
+    /// Opens the folder or archive under the cursor (or goes up on the `..` row).
     pub fn enter(&mut self) {
-        if let Some(e) = self.entries.get(self.cursor).filter(|e| e.is_dir) {
-            if e.name == PARENT {
-                self.go_up();
-            } else {
-                let path = e.path.clone();
-                self.go_to(path, None);
+        let Some(e) = self.entries.get(self.cursor) else { return };
+        if e.name == PARENT {
+            self.go_up();
+        } else if let Some(a) = &mut self.archive {
+            if e.is_dir {
+                a.inner = join_inner(&a.inner, &e.name);
+                self.enter_listing();
             }
+        } else if e.is_dir {
+            let path = e.path.clone();
+            self.go_to(path, None);
+        } else if gc_archive::is_archive(&e.path) {
+            let path = e.path.clone();
+            self.open_archive(path);
         }
+    }
+
+    /// Opens an archive file as a folder.
+    fn open_archive(&mut self, file: PathBuf) {
+        match gc_archive::open(&file) {
+            Ok(index) => {
+                self.archive = Some(ArchiveView { index: Arc::new(index), inner: String::new() });
+                self.cwd = file;
+                self.enter_listing();
+            }
+            Err(e) => self.error = Some(format!("{}: {e}", file.display())),
+        }
+    }
+
+    /// Fresh listing at the top of a new location.
+    fn enter_listing(&mut self) {
+        self.entries.clear();
+        self.cursor = 0;
+        self.marked.clear();
+        self.reload();
     }
 
     /// Switches to another root (e.g. a drive).
@@ -107,29 +150,79 @@ impl Panel {
     }
 
     pub fn go_up(&mut self) {
+        if let Some(a) = &mut self.archive {
+            if let Some((parent, name)) = a.inner.rsplit_once('/') {
+                let (parent, name) = (parent.to_owned(), name.to_owned());
+                a.inner = parent;
+                self.enter_listing();
+                self.select_name(&name);
+                return;
+            }
+            if !a.inner.is_empty() {
+                let name = std::mem::take(&mut a.inner);
+                self.enter_listing();
+                self.select_name(&name);
+                return;
+            }
+            // At the archive root: leave the archive, landing on the archive file.
+            self.archive = None;
+            if let Some(parent) = self.cwd.parent().map(|p| p.to_path_buf()) {
+                let came_from = self.cwd.file_name().map(|n| n.to_string_lossy().into_owned());
+                self.go_to(parent, came_from);
+            }
+            return;
+        }
         if let Some(parent) = self.cwd.parent().map(|p| p.to_path_buf()) {
             let came_from = self.cwd.file_name().map(|n| n.to_string_lossy().into_owned());
             self.go_to(parent, came_from);
         }
     }
 
+    fn select_name(&mut self, name: &str) {
+        if let Some(i) = self.entries.iter().position(|e| e.name == name) {
+            self.cursor = i;
+        }
+    }
+
     fn go_to(&mut self, path: PathBuf, select: Option<String>) {
+        let previous_archive = self.archive.take();
         let previous = std::mem::replace(&mut self.cwd, path);
-        self.entries.clear();
-        self.cursor = 0;
-        self.marked.clear();
-        self.reload();
+        self.enter_listing();
         if self.error.is_some() {
             // Keep the old listing visible, show the error on top of it.
             let err = self.error.take();
             self.cwd = previous;
+            self.archive = previous_archive;
             self.reload();
             self.error = err;
         } else if let Some(name) = select {
-            if let Some(i) = self.entries.iter().position(|e| e.name == name) {
-                self.cursor = i;
-            }
+            self.select_name(&name);
         }
+    }
+
+    /// The folder on disk this panel shows, `None` while an archive is open.
+    pub fn disk_folder(&self) -> Option<&Path> {
+        self.archive.is_none().then_some(self.cwd.as_path())
+    }
+
+    /// Location text for the header, e.g. `C:\data\x.zip\docs`.
+    fn location(&self) -> String {
+        match &self.archive {
+            Some(a) if !a.inner.is_empty() => format!("{}\\{}", self.cwd.display(), a.inner.replace('/', "\\")),
+            _ => self.cwd.display().to_string(),
+        }
+    }
+
+    /// While an archive is open: the archive and the selected inner paths (marked, or under the cursor).
+    pub fn archive_selection(&self) -> Option<(Arc<ArchiveIndex>, Vec<String>)> {
+        let a = self.archive.as_ref()?;
+        let inner = self
+            .targets()
+            .iter()
+            .filter_map(|p| p.strip_prefix(&self.cwd).ok())
+            .map(|rel| rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect::<Vec<_>>().join("/"))
+            .collect();
+        Some((a.index.clone(), inner))
     }
 
     /// Marked entries, or the one under the cursor when nothing is marked.
@@ -151,7 +244,7 @@ impl Panel {
                 self.go_up();
                 clicked = true;
             }
-            ui.add(egui::Label::new(egui::RichText::new(self.cwd.display().to_string()).monospace()).truncate());
+            ui.add(egui::Label::new(egui::RichText::new(self.location()).monospace()).truncate());
         });
         if let Some(err) = &self.error {
             ui.colored_label(theme.error.0, err);
@@ -174,20 +267,15 @@ impl Panel {
         let out = area.show_rows(ui, ROW_H, self.entries.len(), |ui, range| {
             for i in range {
                 let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW_H), Sense::click());
-                let e = &self.entries[i];
                 if resp.clicked() || resp.double_clicked() {
                     self.cursor = i;
                     clicked = true;
                 }
-                if resp.double_clicked() && e.is_dir {
-                    if e.name == PARENT {
-                        self.go_up();
-                    } else {
-                        let path = e.path.clone();
-                        self.go_to(path, None);
-                    }
+                if resp.double_clicked() {
+                    self.enter();
                     return;
                 }
+                let e = &self.entries[i];
                 let painter = ui.painter_at(rect);
                 if i == self.cursor {
                     if active {
@@ -225,6 +313,14 @@ impl Panel {
     }
 }
 
+fn join_inner(inner: &str, name: &str) -> String {
+    if inner.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{inner}/{name}")
+    }
+}
+
 /// Name of the synthetic first row that leads to the parent folder.
 /// No real entry can have this name, so it is safe to compare against.
 const PARENT: &str = "..";
@@ -252,6 +348,42 @@ fn fmt_size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{fmt_size, Panel, PARENT};
+
+    #[test]
+    fn archive_opens_like_a_folder_and_leaves_back_to_its_file() {
+        use std::io::Write;
+        let root = std::env::temp_dir().join(format!("gc_panel_zip_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut w = zip::ZipWriter::new(std::fs::File::create(root.join("t.zip")).unwrap());
+        for name in ["a.txt", "docs/b.txt"] {
+            w.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+            w.write_all(b"x").unwrap();
+        }
+        w.finish().unwrap();
+
+        let mut p = Panel::new(root.clone());
+        assert_eq!(p.entries[p.cursor + 1].name, "t.zip");
+        p.move_cursor(1);
+        p.enter();
+        assert!(p.disk_folder().is_none());
+        let names: Vec<_> = p.entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["..", "docs", "a.txt"]);
+
+        p.move_cursor(1); // docs
+        p.enter();
+        assert_eq!(p.location(), format!("{}\\docs", root.join("t.zip").display()));
+        p.move_cursor(1); // b.txt
+        let (_, inner) = p.archive_selection().unwrap();
+        assert_eq!(inner, ["docs/b.txt"]);
+
+        p.go_up();
+        assert_eq!(p.entries[p.cursor].name, "docs");
+        p.go_up(); // archive root -> leave the archive
+        assert_eq!(p.disk_folder(), Some(root.as_path()));
+        assert_eq!(p.entries[p.cursor].name, "t.zip");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn parent_row_leads_up_and_is_never_an_operation_target() {
