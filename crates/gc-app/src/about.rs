@@ -33,8 +33,9 @@ impl About {
                         ui.add(egui::Image::new((logo.id(), egui::vec2(LOGO_SIZE, LOGO_SIZE))));
                     });
                     ui.add_space(6.0);
-                    ui.heading(format!("Ghost Commander {}", env!("CARGO_PKG_VERSION")));
+                    ui.heading(format!("Ghost Commander v{}", env!("CARGO_PKG_VERSION")));
                     ui.label("Fast, modern dual-pane file manager written in Rust.");
+                    ui.label(format!("Author: {}", env!("CARGO_PKG_AUTHORS")));
                 });
             });
         self.open = open;

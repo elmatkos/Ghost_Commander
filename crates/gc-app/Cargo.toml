@@ -15,7 +15,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 toml = "0.8"
 egui-phosphor = "0.9"
 serde = { version = "1", features = ["derive"] }
-gc-archive = { version = "0.0.1", path = "../gc-archive" }
+gc-archive = { path = "../gc-archive" }
 raw-window-handle = "0.6"
 
 [target.'cfg(windows)'.dependencies]

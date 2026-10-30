@@ -11,6 +11,8 @@ const MAX_BYTES: u64 = 8 * 1024 * 1024;
 #[derive(Default)]
 pub struct Viewer {
     open: Option<Doc>,
+    /// Opened during the current frame.
+    fresh: bool,
 }
 
 struct Doc {
@@ -33,12 +35,14 @@ impl Viewer {
         let title = if total > MAX_BYTES { format!("{name} (first {} MB)", MAX_BYTES >> 20) } else { name };
         let lines = String::from_utf8_lossy(&bytes).lines().map(|l| l.replace('\t', "    ")).collect();
         self.open = Some(Doc { title, lines });
+        self.fresh = true;
         Ok(())
     }
 
     pub fn show(&mut self, ctx: &egui::Context) {
         let Some(doc) = &self.open else { return };
-        let close = ctx.input(|i| i.key_pressed(Key::Escape) || i.key_pressed(Key::F3) || i.key_pressed(Key::Q));
+        // The F3 that opened the viewer is still "pressed" in this very frame: ignore it once.
+        let close = !std::mem::take(&mut self.fresh) && ctx.input(|i| i.key_pressed(Key::Escape) || i.key_pressed(Key::F3) || i.key_pressed(Key::Q));
         let mut open = !close;
         let row_h = ctx.fonts(|f| f.row_height(&egui::FontId::monospace(13.0)));
         egui::Window::new(format!("View: {}", doc.title))

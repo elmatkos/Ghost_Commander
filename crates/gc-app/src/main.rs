@@ -485,7 +485,7 @@ impl eframe::App for App {
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("Ghost Commander")
+            .with_title(concat!("Ghost Commander v", env!("CARGO_PKG_VERSION")))
             .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icon_256.png")).expect("embedded icon is a valid PNG"))
             .with_inner_size([1200.0, 700.0]),
         ..Default::default()
