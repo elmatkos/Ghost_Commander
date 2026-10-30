@@ -1,6 +1,7 @@
 //! F3 on an image: opens it in its own window. Small images show at native size; images larger
 //! than the monitor are scaled down to 75% of the monitor height (friendly to wide monitors).
-//! Decoding and resizing run on a worker thread.
+//! `+` / `-` zoom (`0` resets, Ctrl+wheel works too), drag pans. Decoding and resizing run on a
+//! worker thread.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -11,6 +12,11 @@ use eframe::egui::{self, Key};
 const EXTENSIONS: [&str; 7] = ["png", "jpg", "jpeg", "gif", "bmp", "webp", "ico"];
 /// Share of the monitor height an oversized image is scaled to.
 const HEIGHT_FRACTION: f32 = 0.75;
+/// Zoom change per key press.
+const ZOOM_STEP: f32 = 1.25;
+const ZOOM_RANGE: (f32, f32) = (0.1, 16.0);
+/// Longest side of the full-resolution copy kept for zooming (GPU texture limit).
+const MAX_FULL_SIDE: u32 = 8192;
 
 pub fn is_image(path: &Path) -> bool {
     gc_core::filetype::extension_of(path).is_some_and(|e| EXTENSIONS.contains(&e.as_str()))
@@ -27,23 +33,43 @@ fn target_size(w: u32, h: u32, (mw, mh): (u32, u32)) -> (u32, u32) {
 }
 
 struct Decoded {
-    image: egui::ColorImage,
+    /// What the window shows at first (zoom 1).
+    fitted: egui::ColorImage,
+    /// Sharper copy for zooming in; only kept when `fitted` is a reduction.
+    full: Option<egui::ColorImage>,
     original: [u32; 2],
+}
+
+fn to_color(img: &image::DynamicImage) -> egui::ColorImage {
+    egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.to_rgba8().as_raw())
 }
 
 fn decode(path: &Path, monitor: (u32, u32)) -> Result<Decoded, String> {
     let img = image::open(path).map_err(|e| e.to_string())?;
     let (w, h) = (img.width(), img.height());
     let (tw, th) = target_size(w, h, monitor);
+    if (tw, th) == (w, h) {
+        return Ok(Decoded { fitted: to_color(&img), full: None, original: [w, h] });
+    }
     // Lanczos on the CPU looks much better than the GPU's linear minification.
-    let img = if (tw, th) == (w, h) { img } else { img.resize_exact(tw, th, image::imageops::FilterType::Lanczos3) };
-    let rgba = img.to_rgba8();
-    Ok(Decoded { image: egui::ColorImage::from_rgba_unmultiplied([tw as usize, th as usize], rgba.as_raw()), original: [w, h] })
+    let fitted = to_color(&img.resize_exact(tw, th, image::imageops::FilterType::Lanczos3));
+    let full = if w.max(h) > MAX_FULL_SIDE { to_color(&img.resize(MAX_FULL_SIDE, MAX_FULL_SIDE, image::imageops::FilterType::Lanczos3)) } else { to_color(&img) };
+    Ok(Decoded { fitted, full: Some(full), original: [w, h] })
+}
+
+struct Shown {
+    title: String,
+    fitted: egui::TextureHandle,
+    /// Uploaded on the first zoom-in that needs it.
+    full_image: Option<egui::ColorImage>,
+    full: Option<egui::TextureHandle>,
+    /// 1.0 = fit the window.
+    zoom: f32,
 }
 
 enum State {
     Loading { rx: Receiver<Result<Decoded, String>>, path: PathBuf },
-    Showing { title: String, texture: egui::TextureHandle },
+    Showing(Shown),
 }
 
 #[derive(Default)]
@@ -74,10 +100,10 @@ impl ImageViewer {
                 Ok(Ok(d)) => {
                     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                     let [w, h] = d.original;
-                    let shown = d.image.size[0] as u32;
+                    let shown = d.fitted.size[0] as u32;
                     let title = if shown == w { format!("{name} - {w}x{h}") } else { format!("{name} - {w}x{h} (shown at {}%)", shown * 100 / w) };
-                    let texture = ctx.load_texture("image-viewer", d.image, egui::TextureOptions::LINEAR);
-                    self.state = Some(State::Showing { title, texture });
+                    let fitted = ctx.load_texture("image-viewer", d.fitted, egui::TextureOptions::LINEAR);
+                    self.state = Some(State::Showing(Shown { title, fitted, full_image: d.full, full: None, zoom: 1.0 }));
                 }
                 Ok(Err(e)) => {
                     let msg = format!("{}: {e}", path.display());
@@ -90,20 +116,53 @@ impl ImageViewer {
                 }
             }
         }
-        let Some(State::Showing { title, texture }) = &self.state else { return None };
-        let size = texture.size_vec2() / ctx.pixels_per_point();
+        let Some(State::Showing(s)) = &mut self.state else { return None };
+        let ppp = ctx.pixels_per_point();
+        let size = s.fitted.size_vec2() / ppp;
+        let title = if s.zoom == 1.0 { s.title.clone() } else { format!("{} - zoom {}%", s.title, (s.zoom * 100.0).round()) };
         let mut close = false;
         ctx.show_viewport_immediate(
             egui::ViewportId::from_hash_of("image-viewer"),
-            egui::ViewportBuilder::default().with_title(title.as_str()).with_inner_size(size),
+            egui::ViewportBuilder::default().with_title(title).with_inner_size(size),
             |ctx, _| {
-                egui::CentralPanel::default().frame(egui::Frame::new().fill(egui::Color32::BLACK)).show(ctx, |ui| {
-                    // Follows the window if the user resizes it, keeping the aspect ratio.
-                    let avail = ui.available_size();
-                    let draw = size * (avail.x / size.x).min(avail.y / size.y);
-                    ui.centered_and_justified(|ui| ui.add(egui::Image::new((texture.id(), draw))));
+                let (zoom_in, zoom_out, reset, wheel, quit) = ctx.input(|i| {
+                    (
+                        i.key_pressed(Key::Plus) || i.key_pressed(Key::Equals),
+                        i.key_pressed(Key::Minus),
+                        i.key_pressed(Key::Num0),
+                        i.zoom_delta(),
+                        i.viewport().close_requested() || i.key_pressed(Key::Escape) || i.key_pressed(Key::Q) || i.key_pressed(Key::F3),
+                    )
                 });
-                close = ctx.input(|i| i.viewport().close_requested() || i.key_pressed(Key::Escape) || i.key_pressed(Key::Q) || i.key_pressed(Key::F3));
+                if zoom_in {
+                    s.zoom *= ZOOM_STEP;
+                }
+                if zoom_out {
+                    s.zoom /= ZOOM_STEP;
+                }
+                s.zoom = if reset { 1.0 } else { (s.zoom * wheel).clamp(ZOOM_RANGE.0, ZOOM_RANGE.1) };
+                close = quit;
+
+                egui::CentralPanel::default().frame(egui::Frame::new().fill(egui::Color32::BLACK)).show(ctx, |ui| {
+                    let avail = ui.available_size();
+                    let draw = size * (avail.x / size.x).min(avail.y / size.y) * s.zoom;
+                    // Past the fitted texture's resolution, switch to the sharper full copy.
+                    if draw.x * ppp > s.fitted.size()[0] as f32 && s.full.is_none() {
+                        if let Some(img) = s.full_image.take() {
+                            s.full = Some(ctx.load_texture("image-viewer-full", img, egui::TextureOptions::LINEAR));
+                        }
+                    }
+                    let texture = match &s.full {
+                        Some(full) if draw.x * ppp > s.fitted.size()[0] as f32 => full,
+                        _ => &s.fitted,
+                    };
+                    egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
+                        // Centered while it fits, scrollable (and draggable) once it is larger.
+                        let (area, _) = ui.allocate_exact_size(draw.max(avail), egui::Sense::hover());
+                        let rect = egui::Rect::from_center_size(area.center(), draw);
+                        ui.painter().image(texture.id(), rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+                    });
+                });
             },
         );
         if close {
