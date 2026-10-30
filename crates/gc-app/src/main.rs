@@ -2,6 +2,7 @@
 #![windows_subsystem = "windows"]
 
 mod about;
+mod image_viewer;
 mod panel;
 mod shell_menu;
 mod theme;
@@ -19,6 +20,7 @@ use about::About;
 use gc_archive::ArchiveIndex;
 use panel::{Panel, PanelAction};
 use theme_editor::ThemeManager;
+use image_viewer::ImageViewer;
 use viewer::Viewer;
 
 enum Dialog {
@@ -47,6 +49,7 @@ struct App {
     about: About,
     themes: ThemeManager,
     viewer: Viewer,
+    images: ImageViewer,
 }
 
 impl App {
@@ -63,11 +66,12 @@ impl App {
             about: About::default(),
             themes: ThemeManager::load(&cc.egui_ctx),
             viewer: Viewer::default(),
+            images: ImageViewer::default(),
         }
     }
 
     /// F3: built-in viewer. F4: external editor.
-    fn view_or_edit(&mut self, edit: bool) {
+    fn view_or_edit(&mut self, ctx: &egui::Context, edit: bool) {
         let Some(file) = self.panels[self.active].current_file() else {
             self.status = Some("Select a file on disk first (archives and folders are not supported yet).".into());
             return;
@@ -79,6 +83,9 @@ impl App {
             #[cfg(not(windows))]
             let editor = "xdg-open";
             std::process::Command::new(editor).arg(&file).spawn().map(|_| ())
+        } else if image_viewer::is_image(&file) {
+            self.images.open(ctx, &file);
+            Ok(())
         } else {
             self.viewer.open(&file)
         };
@@ -181,10 +188,10 @@ impl App {
             self.open_dialog_for(Key::F8, shift || cut);
         }
         if pressed(ctx, Key::F3) {
-            self.view_or_edit(false);
+            self.view_or_edit(ctx, false);
         }
         if pressed(ctx, Key::F4) {
-            self.view_or_edit(true);
+            self.view_or_edit(ctx, true);
         }
         let ctrl = ctx.input(|i| i.modifiers.ctrl);
         for (key, panel) in [(Key::Num1, 0), (Key::Num2, 1)] {
@@ -476,6 +483,9 @@ impl eframe::App for App {
         self.about.show(ctx);
         self.themes.show(ctx);
         self.viewer.show(ctx);
+        if let Some(err) = self.images.show(ctx) {
+            self.status = Some(err);
+        }
 
         if self.jobs.iter().any(|j| !j.job.progress.finished.load(Ordering::Acquire)) {
             ctx.request_repaint_after(Duration::from_millis(50));
