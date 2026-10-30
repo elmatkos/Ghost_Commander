@@ -1,3 +1,6 @@
+// GUI subsystem: no console window next to the app (also in debug builds).
+#![windows_subsystem = "windows"]
+
 mod panel;
 
 use std::path::PathBuf;
