@@ -35,7 +35,13 @@ impl Panel {
     pub fn reload(&mut self) {
         let keep = self.entries.get(self.cursor).map(|e| e.name.clone());
         match list_dir(&self.cwd) {
-            Ok(entries) => {
+            Ok(mut entries) => {
+                if let Some(parent) = self.cwd.parent() {
+                    entries.insert(
+                        0,
+                        Entry { name: PARENT.into(), path: parent.to_path_buf(), is_dir: true, size: 0, modified: None },
+                    );
+                }
                 self.entries = entries;
                 self.error = None;
             }
@@ -73,7 +79,7 @@ impl Panel {
     }
 
     pub fn toggle_mark_and_advance(&mut self) {
-        if let Some(e) = self.entries.get(self.cursor) {
+        if let Some(e) = self.entries.get(self.cursor).filter(|e| e.name != PARENT) {
             if !self.marked.remove(&e.path) {
                 self.marked.insert(e.path.clone());
             }
@@ -84,8 +90,12 @@ impl Panel {
     /// Enters the directory under the cursor.
     pub fn enter(&mut self) {
         if let Some(e) = self.entries.get(self.cursor).filter(|e| e.is_dir) {
-            let path = e.path.clone();
-            self.go_to(path, None);
+            if e.name == PARENT {
+                self.go_up();
+            } else {
+                let path = e.path.clone();
+                self.go_to(path, None);
+            }
         }
     }
 
@@ -123,7 +133,7 @@ impl Panel {
     /// Marked entries, or the one under the cursor when nothing is marked.
     pub fn targets(&self) -> Vec<PathBuf> {
         if self.marked.is_empty() {
-            self.entries.get(self.cursor).map(|e| vec![e.path.clone()]).unwrap_or_default()
+            self.entries.get(self.cursor).filter(|e| e.name != PARENT).map(|e| vec![e.path.clone()]).unwrap_or_default()
         } else {
             self.entries.iter().filter(|e| self.marked.contains(&e.path)).map(|e| e.path.clone()).collect()
         }
@@ -168,8 +178,12 @@ impl Panel {
                     clicked = true;
                 }
                 if resp.double_clicked() && e.is_dir {
-                    let path = e.path.clone();
-                    self.go_to(path, None);
+                    if e.name == PARENT {
+                        self.go_up();
+                    } else {
+                        let path = e.path.clone();
+                        self.go_to(path, None);
+                    }
                     return;
                 }
                 let painter = ui.painter_at(rect);
@@ -206,6 +220,9 @@ impl Panel {
     }
 }
 
+/// Name of the synthetic first row that leads to the parent folder.
+/// No real entry can have this name, so it is safe to compare against.
+const PARENT: &str = "..";
 const ROW_H: f32 = 20.0;
 /// Width reserved for the "YYYY-MM-DD HH:MM" column plus a gap.
 const DATE_COL_W: f32 = 140.0;
@@ -227,7 +244,32 @@ fn fmt_size(bytes: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::fmt_size;
+    use super::{fmt_size, Panel, PARENT};
+
+    #[test]
+    fn parent_row_leads_up_and_is_never_an_operation_target() {
+        let root = std::env::temp_dir().join(format!("gc_panel_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("child")).unwrap();
+        std::fs::write(root.join("file.txt"), b"x").unwrap();
+
+        let mut p = Panel::new(root.clone());
+        assert_eq!(p.entries[0].name, PARENT);
+        assert!(p.targets().is_empty(), "cursor on '..' must not select anything");
+
+        p.toggle_mark_and_advance();
+        assert!(p.marked.is_empty(), "'..' cannot be marked");
+
+        assert_eq!(p.entries[p.cursor].name, "child"); // marking '..' still advanced the cursor
+        p.enter();
+        assert_eq!(p.cwd, root.join("child"));
+        assert_eq!(p.entries[0].name, PARENT);
+
+        p.enter(); // cursor starts on '..'
+        assert_eq!(p.cwd, root);
+        assert_eq!(p.entries[p.cursor].name, "child", "cursor returns to the folder we left");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn sizes_are_human_readable() {
