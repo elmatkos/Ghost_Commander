@@ -1,5 +1,6 @@
 //! Core logic for Ghost Commander: directory listing, no UI dependencies.
 
+pub mod filetype;
 pub mod jobs;
 
 use std::fs;
@@ -22,7 +23,13 @@ pub fn list_dir(dir: &Path) -> io::Result<Vec<Entry>> {
     let mut entries: Vec<Entry> = fs::read_dir(dir)?
         .filter_map(|e| e.ok())
         .filter_map(|e| {
-            let meta = e.metadata().ok()?;
+            let mut meta = e.metadata().ok()?;
+            if meta.file_type().is_symlink() {
+                // Show the target's type and size; a dangling link keeps its own metadata.
+                if let Ok(target) = fs::metadata(e.path()) {
+                    meta = target;
+                }
+            }
             Some(Entry {
                 name: e.file_name().to_string_lossy().into_owned(),
                 path: e.path(),
@@ -72,5 +79,24 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
 
         assert_eq!(names, ["zeta", "alpha.txt", "Beta.txt"]);
+    }
+
+    #[test]
+    fn symlinks_show_the_size_of_their_target() {
+        let dir = std::env::temp_dir().join(format!("gc_core_symlink_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("real.txt"), b"12345").unwrap();
+        // Creating symlinks needs a privilege on Windows; skip quietly without it.
+        #[cfg(windows)]
+        let linked = std::os::windows::fs::symlink_file(dir.join("real.txt"), dir.join("link.txt")).is_ok();
+        #[cfg(not(windows))]
+        let linked = std::os::unix::fs::symlink(dir.join("real.txt"), dir.join("link.txt")).is_ok();
+
+        let size = list_dir(&dir).unwrap().into_iter().find(|e| e.name == "link.txt").map(|e| e.size);
+        fs::remove_dir_all(&dir).unwrap();
+        if linked {
+            assert_eq!(size, Some(5));
+        }
     }
 }

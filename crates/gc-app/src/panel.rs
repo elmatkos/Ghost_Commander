@@ -1,8 +1,10 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use eframe::egui::{self, Align2, Color32, FontId, Sense, Stroke, StrokeKind};
+use eframe::egui::{self, Align2, FontId, Sense, Stroke, StrokeKind};
 use gc_core::{list_dir, Entry};
+
+use crate::theme::Theme;
 
 pub struct Panel {
     pub cwd: PathBuf,
@@ -140,9 +142,9 @@ impl Panel {
     }
 
     /// Draws the panel. Returns true when the user clicked into it.
-    pub fn ui(&mut self, ui: &mut egui::Ui, id: &str, active: bool) -> bool {
+    pub fn ui(&mut self, ui: &mut egui::Ui, id: &str, active: bool, theme: &Theme) -> bool {
         let mut clicked = false;
-        let accent = ui.visuals().selection.bg_fill;
+        let accent = theme.accent.0;
 
         ui.horizontal(|ui| {
             if ui.small_button("..").clicked() {
@@ -152,7 +154,7 @@ impl Panel {
             ui.add(egui::Label::new(egui::RichText::new(self.cwd.display().to_string()).monospace()).truncate());
         });
         if let Some(err) = &self.error {
-            ui.colored_label(Color32::LIGHT_RED, err);
+            ui.colored_label(theme.error.0, err);
         }
 
         ui.spacing_mut().item_spacing.y = 0.0;
@@ -196,15 +198,18 @@ impl Panel {
                 }
                 let marked = self.marked.contains(&e.path);
                 let color = if marked {
-                    Color32::from_rgb(255, 210, 90)
+                    theme.marked.0
                 } else if e.is_dir {
-                    Color32::from_rgb(140, 200, 255)
+                    theme.dir.0
                 } else {
-                    ui.visuals().text_color()
+                    theme.text.0
                 };
                 let font = FontId::monospace(13.0);
+                let (glyph, glyph_color) = theme.style(theme.category_of(e));
+                let left = rect.left_center() + egui::vec2(6.0, 0.0);
+                painter.text(left, Align2::LEFT_CENTER, glyph, FontId::proportional(15.0), glyph_color);
                 let name = if e.is_dir { format!("[{}]", e.name) } else { e.name.clone() };
-                painter.text(rect.left_center() + egui::vec2(6.0, 0.0), Align2::LEFT_CENTER, name, font.clone(), color);
+                painter.text(left + egui::vec2(ICON_COL_W, 0.0), Align2::LEFT_CENTER, name, font.clone(), color);
                 let right = rect.right_center() - egui::vec2(6.0, 0.0);
                 if let Some(t) = e.modified {
                     let date = chrono::DateTime::<chrono::Local>::from(t).format("%Y-%m-%d %H:%M").to_string();
@@ -224,6 +229,8 @@ impl Panel {
 /// No real entry can have this name, so it is safe to compare against.
 const PARENT: &str = "..";
 const ROW_H: f32 = 20.0;
+/// Space before the name for the file-type icon.
+const ICON_COL_W: f32 = 22.0;
 /// Width reserved for the "YYYY-MM-DD HH:MM" column plus a gap.
 const DATE_COL_W: f32 = 140.0;
 

@@ -3,6 +3,8 @@
 
 mod about;
 mod panel;
+mod theme;
+mod theme_editor;
 
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -12,6 +14,7 @@ use eframe::egui::{self, Key};
 use gc_core::jobs::{self, Job, Op, Resolution};
 use about::About;
 use panel::Panel;
+use theme_editor::ThemeManager;
 
 enum Dialog {
     Confirm(Op),
@@ -35,10 +38,12 @@ struct App {
     /// "Apply to all" checkbox state of the conflict dialog.
     apply_all: bool,
     about: About,
+    themes: ThemeManager,
 }
 
 impl App {
-    fn new() -> Self {
+    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        install_icon_font(&cc.egui_ctx);
         let start = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         Self {
             panels: [Panel::new(start.clone()), Panel::new(start)],
@@ -48,6 +53,7 @@ impl App {
             status: None,
             apply_all: false,
             about: About::default(),
+            themes: ThemeManager::load(&cc.egui_ctx),
         }
     }
 
@@ -108,6 +114,9 @@ impl App {
         }
         if pressed(ctx, Key::F1) {
             self.about.open = true;
+        }
+        if pressed(ctx, Key::F9) {
+            self.themes.open = true;
         }
         let shift = ctx.input(|i| i.modifiers.shift);
         for key in [Key::F5, Key::F6, Key::F7, Key::F8] {
@@ -274,6 +283,7 @@ impl App {
 
     fn show_jobs(&mut self, ui: &mut egui::Ui) {
         let mut dismiss: Option<usize> = None;
+        let error = self.themes.active.error.0;
         for (i, j) in self.jobs.iter().enumerate() {
             let p = &j.job.progress;
             ui.horizontal(|ui| {
@@ -282,7 +292,7 @@ impl App {
                     if ui.small_button("x").clicked() {
                         dismiss = Some(i);
                     }
-                    ui.colored_label(egui::Color32::LIGHT_RED, format!("{} error(s)", p.errors().len()));
+                    ui.colored_label(error, format!("{} error(s)", p.errors().len()));
                 } else {
                     let total = p.total.load(Ordering::Relaxed).max(1);
                     let frac = (p.done.load(Ordering::Relaxed) as f32 / total as f32).clamp(0.0, 1.0);
@@ -294,7 +304,7 @@ impl App {
             });
             if p.finished.load(Ordering::Acquire) {
                 for err in p.errors() {
-                    ui.colored_label(egui::Color32::LIGHT_RED, err);
+                    ui.colored_label(error, err);
                 }
             }
         }
@@ -306,7 +316,7 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let dialog_open = self.dialog.is_some() || self.about.open || self.jobs.iter().any(|j| j.job.progress.pending_conflict().is_some());
+        let dialog_open = self.dialog.is_some() || self.about.open || self.themes.open || self.jobs.iter().any(|j| j.job.progress.pending_conflict().is_some());
         if !dialog_open {
             self.handle_keys(ctx);
         }
@@ -314,7 +324,7 @@ impl eframe::App for App {
 
         egui::TopBottomPanel::bottom("bottom").show(ctx, |ui| {
             if let Some(s) = &self.status {
-                ui.colored_label(egui::Color32::LIGHT_RED, s);
+                ui.colored_label(self.themes.active.error.0, s);
             }
             self.show_jobs(ui);
             ui.horizontal(|ui| {
@@ -327,6 +337,9 @@ impl eframe::App for App {
                     if ui.small_button("About (F1)").clicked() {
                         self.about.open = true;
                     }
+                    if ui.small_button("Themes (F9)").clicked() {
+                        self.themes.open = true;
+                    }
                 });
             });
         });
@@ -335,7 +348,7 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.columns(2, |cols| {
                 for (i, col) in cols.iter_mut().enumerate() {
-                    if self.panels[i].ui(col, &format!("panel{i}"), self.active == i) {
+                    if self.panels[i].ui(col, &format!("panel{i}"), self.active == i, &self.themes.active) {
                         clicked = Some(i);
                     }
                 }
@@ -348,6 +361,7 @@ impl eframe::App for App {
         self.show_dialog(ctx);
         self.show_conflict(ctx);
         self.about.show(ctx);
+        self.themes.show(ctx);
 
         if self.jobs.iter().any(|j| !j.job.progress.finished.load(Ordering::Acquire)) {
             ctx.request_repaint_after(Duration::from_millis(50));
@@ -363,5 +377,12 @@ fn main() -> eframe::Result<()> {
             .with_inner_size([1200.0, 700.0]),
         ..Default::default()
     };
-    eframe::run_native("Ghost Commander", options, Box::new(|_cc| Ok(Box::new(App::new()))))
+    eframe::run_native("Ghost Commander", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
+}
+
+/// Registers the Phosphor icon font so file-type icons render as text glyphs.
+fn install_icon_font(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+    ctx.set_fonts(fonts);
 }

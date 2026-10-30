@@ -76,3 +76,27 @@ Branding lives in `assets/` (`icon.ico` is embedded into the exe by `crates/gc-a
 
 **Release**
 - Sign the binary and installer once a code-signing certificate is obtained (signtool + timestamping, CI step).
+
+## Themes and file icons
+
+F9 opens the theme editor (live preview). Built-in themes: Dark, Light, Ghost, Norton Classic. Custom themes are TOML files in `%APPDATA%\Ghost Commander\themes\`; the editor saves them there, and the selected theme is remembered in `settings.toml`.
+
+A theme sets the semantic colors (background, text, cursor, folders, marked, errors), a color and an icon per file type (`folder`, `archive`, `image`, `audio`, `video`, `document`, `code`, `text`, `executable`, `config`, `other`), and optional `extensions` overrides (e.g. `mkv = "video"`). An icon is a built-in name (Phosphor icon font: `folder`, `archive`, `star`, ...) or any single character. Minimal custom theme:
+
+```toml
+name = "Mine"
+dark = true
+background = "#101820"
+text = "#e0e0e0"
+accent = "#2a5db0"
+dir = "#7fd1ff"
+marked = "#ffd166"
+error = "#ff6b6b"
+
+[types.archive]
+color = "#ff9f43"
+icon = "package"
+
+[extensions]
+mkv = "video"
+```
