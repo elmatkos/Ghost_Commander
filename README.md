@@ -4,6 +4,8 @@ A fast, modern, dual-pane file manager written in Rust. It follows the Norton / 
 
 **Status:** Planning (design proposal, nothing built yet).
 
+**Repo:** https://github.com/elmatkos/Ghost_Commander (private for now, to be made public later).
+
 ## Goals
 
 - Speed first: instant directory listing, no UI stalls, all I/O off the UI thread.
