@@ -16,13 +16,32 @@ use gc_core::Entry;
 enum Kind {
     Zip,
     SevenZip,
+    Tar(Compression),
+}
+
+/// Outer compression of a tarball.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Compression {
+    None,
+    Gzip,
+    Xz,
 }
 
 fn kind_of(path: &Path) -> Option<Kind> {
-    match path.extension()?.to_string_lossy().to_ascii_lowercase().as_str() {
-        "zip" => Some(Kind::Zip),
-        "7z" => Some(Kind::SevenZip),
-        _ => None,
+    let name = path.file_name()?.to_string_lossy().to_ascii_lowercase();
+    let ends = |suffixes: &[&str]| suffixes.iter().any(|s| name.ends_with(s));
+    if ends(&[".zip"]) {
+        Some(Kind::Zip)
+    } else if ends(&[".7z"]) {
+        Some(Kind::SevenZip)
+    } else if ends(&[".tar.gz", ".tgz"]) {
+        Some(Kind::Tar(Compression::Gzip))
+    } else if ends(&[".tar.xz", ".txz"]) {
+        Some(Kind::Tar(Compression::Xz))
+    } else if ends(&[".tar"]) {
+        Some(Kind::Tar(Compression::None))
+    } else {
+        None
     }
 }
 
@@ -69,6 +88,7 @@ pub fn open(file: &Path) -> io::Result<ArchiveIndex> {
     let entries = match kind {
         Kind::Zip => read_zip_index(file)?,
         Kind::SevenZip => read_7z_index(file)?,
+        Kind::Tar(c) => read_tar_index(file, c)?,
     };
     Ok(ArchiveIndex { file: file.to_path_buf(), kind, entries })
 }
@@ -105,6 +125,34 @@ fn read_7z_index(file: &Path) -> io::Result<Vec<ArchiveEntry>> {
             Some(ArchiveEntry { path: normalize(&f.name)?, is_dir: f.is_directory, size: f.size, modified, zip_index: 0 })
         })
         .collect())
+}
+
+/// A tarball is a stream: the decompressor is always read from the start.
+fn tar_archive(file: &Path, compression: Compression) -> io::Result<tar::Archive<Box<dyn io::Read>>> {
+    let input = BufReader::new(File::open(file)?);
+    let reader: Box<dyn io::Read> = match compression {
+        Compression::None => Box::new(input),
+        Compression::Gzip => Box::new(flate2::read::MultiGzDecoder::new(input)),
+        Compression::Xz => Box::new(lzma_rust2::XzReader::new(input, true)),
+    };
+    Ok(tar::Archive::new(reader))
+}
+
+/// Only regular files and folders are listed (links and devices are skipped).
+fn read_tar_index(file: &Path, compression: Compression) -> io::Result<Vec<ArchiveEntry>> {
+    let mut archive = tar_archive(file, compression)?;
+    let mut entries = Vec::new();
+    for entry in archive.entries()? {
+        let entry = entry?;
+        let kind = entry.header().entry_type();
+        if !(kind.is_file() || kind.is_dir()) {
+            continue;
+        }
+        let Some(path) = entry.path().ok().and_then(|p| normalize(&p.to_string_lossy())) else { continue };
+        let modified = entry.header().mtime().ok().filter(|&s| s > 0).map(|s| UNIX_EPOCH + Duration::from_secs(s));
+        entries.push(ArchiveEntry { path, is_dir: kind.is_dir(), size: entry.size(), modified, zip_index: 0 });
+    }
+    Ok(entries)
 }
 
 /// Windows FILETIME (100 ns since 1601) to `SystemTime`; `None` outside the representable range.
@@ -170,6 +218,38 @@ impl ArchiveIndex {
         match self.kind {
             Kind::Zip => self.extract_zip(&items, dest_dir, p),
             Kind::SevenZip => self.extract_7z(&items, dest_dir, p),
+            Kind::Tar(c) => self.extract_tar(c, &items, dest_dir, p),
+        }
+    }
+
+    /// One pass over the stream, writing only the wanted entries.
+    fn extract_tar(&self, compression: Compression, items: &[Item], dest_dir: &Path, p: &Progress) {
+        let mut wanted: HashMap<&str, &PathBuf> = HashMap::new();
+        for entry in items {
+            if entry.is_dir {
+                if let Err(e) = fs::create_dir_all(dest_dir.join(&entry.rel)) {
+                    p.fail(format!("{}: {e}", entry.path));
+                }
+            } else {
+                wanted.insert(entry.path.as_str(), &entry.rel);
+            }
+        }
+        let result = tar_archive(&self.file, compression).and_then(|mut archive| {
+            for entry in archive.entries()? {
+                if p.cancelled() || wanted.is_empty() {
+                    break;
+                }
+                let mut entry = entry?;
+                let Some(rel) = entry.path().ok().and_then(|n| normalize(&n.to_string_lossy())).and_then(|n| wanted.remove(n.as_str())) else { continue };
+                let (size, target) = (entry.size(), dest_dir.join(rel));
+                if let Err(e) = prepare_parent(&target).and_then(|_| jobs::copy_stream(&mut entry, size, &target, p).map(|_| ())) {
+                    p.fail(format!("{}: {e}", target.display()));
+                }
+            }
+            Ok(())
+        });
+        if let Err(e) = result {
+            p.fail(format!("{}: {e}", self.file.display()));
         }
     }
 
@@ -276,15 +356,19 @@ pub fn cleanup_nested() {
 pub enum PackFormat {
     Zip,
     SevenZip,
+    TarGz,
+    TarXz,
 }
 
 impl PackFormat {
-    pub const ALL: [PackFormat; 2] = [PackFormat::Zip, PackFormat::SevenZip];
+    pub const ALL: [PackFormat; 4] = [PackFormat::Zip, PackFormat::SevenZip, PackFormat::TarGz, PackFormat::TarXz];
 
     pub fn extension(self) -> &'static str {
         match self {
             PackFormat::Zip => "zip",
             PackFormat::SevenZip => "7z",
+            PackFormat::TarGz => "tar.gz",
+            PackFormat::TarXz => "tar.xz",
         }
     }
 }
@@ -357,6 +441,8 @@ pub fn pack(format: PackFormat, srcs: &[PathBuf], dest: &Path, p: &Progress) {
     let result = match format {
         PackFormat::Zip => pack_zip(&items, dest, p),
         PackFormat::SevenZip => pack_7z(&items, dest, p),
+        PackFormat::TarGz => pack_tar(&items, dest, Compression::Gzip, p),
+        PackFormat::TarXz => pack_tar(&items, dest, Compression::Xz, p),
     };
     if let Err(e) = result {
         if e.kind() != io::ErrorKind::Interrupted {
@@ -420,6 +506,50 @@ fn pack_7z(items: &[PackItem], dest: &Path, p: &Progress) -> io::Result<()> {
     }
     w.finish()?;
     Ok(())
+}
+
+fn pack_tar(items: &[PackItem], dest: &Path, compression: Compression, p: &Progress) -> io::Result<()> {
+    use std::io::Write;
+    let out = io::BufWriter::new(fs::OpenOptions::new().write(true).create_new(true).open(dest)?);
+    match compression {
+        Compression::None => tar_items(items, out, p)?.flush(),
+        Compression::Gzip => tar_items(items, flate2::write::GzEncoder::new(out, flate2::Compression::default()), p)?.finish()?.flush(),
+        Compression::Xz => {
+            // Independent blocks let every core compress a slice at the same time.
+            let mut options = lzma_rust2::XzOptions::with_preset(6);
+            options.set_block_size(std::num::NonZeroU64::new(8 << 20));
+            let workers = std::thread::available_parallelism().map_or(2, |n| n.get() as u32);
+            let writer = lzma_rust2::XzWriterMt::new(out, options, workers).map_err(io::Error::other)?;
+            tar_items(items, writer, p)?.finish().map_err(io::Error::other)?.flush()
+        }
+    }
+}
+
+fn tar_items<W: io::Write>(items: &[PackItem], out: W, p: &Progress) -> io::Result<W> {
+    let mut builder = tar::Builder::new(out);
+    for item in items {
+        if p.cancelled() {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+        }
+        let meta = match fs::metadata(&item.path) {
+            Ok(m) => m,
+            Err(e) => {
+                p.fail(format!("{}: {e}", item.path.display()));
+                continue;
+            }
+        };
+        let mut header = tar::Header::new_gnu();
+        header.set_metadata(&meta);
+        if item.is_dir {
+            builder.append_data(&mut header, &item.name, io::empty())?;
+            continue;
+        }
+        match File::open(&item.path) {
+            Ok(f) => builder.append_data(&mut header, &item.name, CountingReader { inner: f, p })?,
+            Err(e) => p.fail(format!("{}: {e}", item.path.display())),
+        }
+    }
+    builder.into_inner()
 }
 
 /// Starts packing on a worker thread.
@@ -596,6 +726,25 @@ mod tests {
     #[test]
     fn pack_7z_round_trips() {
         pack_round_trip(PackFormat::SevenZip);
+    }
+
+    #[test]
+    fn pack_tar_gz_round_trips() {
+        pack_round_trip(PackFormat::TarGz);
+    }
+
+    #[test]
+    fn pack_tar_xz_round_trips() {
+        pack_round_trip(PackFormat::TarXz);
+    }
+
+    #[test]
+    fn tar_names_are_recognized() {
+        for name in ["a.tar", "a.TAR.GZ", "a.tgz", "a.tar.xz", "a.txz"] {
+            assert!(is_archive(Path::new(name)), "{name}");
+        }
+        assert!(!is_archive(Path::new("a.gz")));
+        assert!(!is_archive(Path::new("tar")));
     }
 
     #[test]

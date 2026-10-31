@@ -1187,6 +1187,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "filetime"
+version = "0.2.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c287a33c7f0a620c38e641e7f60827713987b3c0f26e8ddc9462cc69cf75759"
+dependencies = [
+ "cfg-if",
+ "libc",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1311,7 +1321,7 @@ dependencies = [
 
 [[package]]
 name = "gc-app"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "chrono",
  "eframe",
@@ -1329,18 +1339,21 @@ dependencies = [
 
 [[package]]
 name = "gc-archive"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "chrono",
+ "flate2",
  "gc-core",
+ "lzma-rust2",
  "rayon",
  "sevenz-rust2",
+ "tar",
  "zip",
 ]
 
 [[package]]
 name = "gc-core"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "trash",
  "windows-sys 0.59.0",
@@ -1959,6 +1972,9 @@ name = "lzma-rust2"
 version = "0.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1c46f3fcd2e888afdb01a07efc071cb21300e07c68d32c3e8b01b5c8cb1fcaa"
+dependencies = [
+ "sha2",
+]
 
 [[package]]
 name = "malloc_buf"
@@ -3197,6 +3213,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
+ "xattr",
+]
+
+[[package]]
 name = "tempfile"
 version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4339,6 +4366,16 @@ name = "x11rb-protocol"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ea6fc2961e4ef194dcbfe56bb845534d0dc8098940c7e5c012a258bfec6701bd"
+
+[[package]]
+name = "xattr"
+version = "1.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "963d6fab92d5504b971dc8bd90ca743c2575e590bc8071ea5bc571598667ae08"
+dependencies = [
+ "libc",
+ "rustix 1.1.6",
+]
 
 [[package]]
 name = "xcursor"
