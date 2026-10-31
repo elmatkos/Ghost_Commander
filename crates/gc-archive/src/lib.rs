@@ -416,6 +416,11 @@ fn walk(path: &Path, name: String, out: &mut Vec<PackItem>, p: &Progress) {
 /// the rest is added when the archive is finished, so the bar does not sit at 100% early.
 const COMPRESSED_PERCENT: u64 = 90;
 
+/// Size of one independently compressed block (and of the dictionary) for 7z and xz. Every core
+/// works on one block, so reads can run ahead of the compressor by about cores x this much:
+/// small blocks keep the progress bar close to the real work.
+const BLOCK_BYTES: u64 = 2 << 20;
+
 struct CountingReader<'a, R> {
     inner: R,
     p: &'a Progress,
@@ -532,7 +537,9 @@ fn pack_7z(items: &[PackItem], dest: &Path, p: &Progress) -> io::Result<()> {
     let other = |e: sevenz_rust2::Error| io::Error::other(e.to_string());
     let mut w = sevenz_rust2::ArchiveWriter::create(dest).map_err(other)?;
     let threads = std::thread::available_parallelism().map_or(2, |n| n.get() as u32);
-    w.set_content_methods(vec![sevenz_rust2::encoder_options::Lzma2Options::from_level_mt(5, threads, 8 << 20).into()]);
+    let mut lzma2 = sevenz_rust2::encoder_options::Lzma2Options::from_level_mt(5, threads, BLOCK_BYTES);
+    lzma2.set_dictionary_size(BLOCK_BYTES as u32);
+    w.set_content_methods(vec![lzma2.into()]);
 
     let mut entries = Vec::new();
     let mut readers = Vec::new();
@@ -561,7 +568,8 @@ fn pack_tar(items: &[PackItem], dest: &Path, compression: Compression, p: &Progr
         Compression::Xz => {
             // Independent blocks let every core compress a slice at the same time.
             let mut options = lzma_rust2::XzOptions::with_preset(5);
-            options.set_block_size(std::num::NonZeroU64::new(8 << 20));
+            options.lzma_options.dict_size = BLOCK_BYTES as u32;
+            options.set_block_size(std::num::NonZeroU64::new(BLOCK_BYTES));
             let workers = std::thread::available_parallelism().map_or(2, |n| n.get() as u32);
             let writer = lzma_rust2::XzWriterMt::new(out, options, workers).map_err(io::Error::other)?;
             tar_items(items, writer, COMPRESSED_PERCENT, p)?.finish().map_err(io::Error::other)?.flush()

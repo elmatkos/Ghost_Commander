@@ -108,3 +108,7 @@ Enter on any other file opens it with its Windows default program (pictures in t
 ## Context menu and Delete
 
 Right click on files or folders on disk shows the real Windows Explorer menu (Open with, Send to, 7-Zip, Properties, ...); a right click on an unmarked row acts on that row only, on a marked row on all marked. Inside archives a small built-in menu offers Open and Extract. `Del` / `Shift+Del` work like F8 / Shift+F8. F3 opens a read-only text viewer (first 8 MB; also for files inside archives, which are extracted to a scratch folder first, as for F4 and Enter), or the image viewer for png, jpg, gif, bmp, webp and ico (own window: native size if it fits the monitor, otherwise scaled to 75% of the monitor height; Left/Right browse the folder's images, `+` / `-` zoom, `0` resets, drag pans; Esc, Q or F3 closes it), F4 opens the file in Notepad.
+
+## Menu, drive buttons and status line
+
+The menu bar has Config (Options..., Themes...) and Help (About). Config > Options switches the drive buttons on or off (and the free-space bar under each drive); settings live in `%APPDATA%\Ghost Commander\settings.toml`. With drive buttons on, every panel gets a row of pills (type icon, letter, used-space bar, details on hover) plus `\` (root of the drive) and `..` (parent folder). The drive list is refreshed by a background thread, so a disconnected network drive cannot freeze the window. Under each list a status line shows `marked / all in files, dirs` as in Total Commander (folder sizes are not calculated).

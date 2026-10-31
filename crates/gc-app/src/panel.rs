@@ -363,6 +363,35 @@ impl Panel {
         }
     }
 
+    /// Counts for the status line: (marked, total) as (files, dirs, bytes). The `..` row is not counted.
+    fn stats(&self) -> ((usize, usize, u64), (usize, usize, u64)) {
+        let (mut marked, mut total) = ((0, 0, 0u64), (0, 0, 0u64));
+        for e in self.entries.iter().filter(|e| e.name != PARENT) {
+            let counters = if self.marked.contains(&e.path) { vec![&mut total, &mut marked] } else { vec![&mut total] };
+            for c in counters {
+                if e.is_dir {
+                    c.1 += 1;
+                } else {
+                    c.0 += 1;
+                    c.2 += e.size;
+                }
+            }
+        }
+        (marked, total)
+    }
+
+    /// Total Commander style summary under the list: `marked / all in files, dirs`.
+    fn show_status(&self, ui: &mut egui::Ui, theme: &Theme) {
+        let ((mf, md, ms), (tf, td, ts)) = self.stats();
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), STATUS_H), Sense::hover());
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 3.0, ui.visuals().faint_bg_color);
+        let any = mf + md > 0;
+        let text = format!("{} / {} in {mf} / {tf} file(s), {md} / {td} dir(s)", fmt_size(ms), fmt_size(ts));
+        let color = if any { theme.marked.0 } else { theme.text.0.gamma_multiply(0.75) };
+        painter.text(rect.left_center() + egui::vec2(6.0, 0.0), Align2::LEFT_CENTER, text, FontId::monospace(12.0), color);
+    }
+
     /// Draws the panel. Returns true when the user clicked into it.
     pub fn ui(&mut self, ui: &mut egui::Ui, id: &str, active: bool, theme: &Theme) -> bool {
         self.poll();
@@ -386,7 +415,7 @@ impl Panel {
         }
 
         ui.spacing_mut().item_spacing.y = 0.0;
-        let mut area = egui::ScrollArea::vertical().id_salt(id).auto_shrink(false);
+        let mut area = egui::ScrollArea::vertical().id_salt(id).auto_shrink(false).max_height((ui.available_height() - STATUS_H).max(ROW_H));
         if self.scroll_to_cursor {
             let top = self.cursor as f32 * ROW_H;
             let mut off = self.last_offset;
@@ -475,6 +504,7 @@ impl Panel {
         });
         self.last_offset = out.state.offset.y;
         self.last_height = out.inner_rect.height();
+        self.show_status(ui, theme);
         clicked
     }
 }
@@ -491,12 +521,14 @@ fn join_inner(inner: &str, name: &str) -> String {
 /// No real entry can have this name, so it is safe to compare against.
 const PARENT: &str = "..";
 const ROW_H: f32 = 20.0;
+/// Height of the status line under the list.
+const STATUS_H: f32 = 22.0;
 /// Space before the name for the file-type icon.
 const ICON_COL_W: f32 = 22.0;
 /// Width reserved for the "YYYY-MM-DD HH:MM" column plus a gap.
 const DATE_COL_W: f32 = 140.0;
 
-fn fmt_size(bytes: u64) -> String {
+pub fn fmt_size(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut v = bytes as f64;
     let mut u = 0;

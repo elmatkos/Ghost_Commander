@@ -63,6 +63,61 @@ pub fn drives() -> Vec<PathBuf> {
     vec![PathBuf::from("/")]
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DriveKind {
+    Fixed,
+    Removable,
+    Network,
+    Optical,
+    Other,
+}
+
+/// A drive with its type and capacity (`total` is 0 when there is no medium or it cannot be read).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DriveInfo {
+    pub root: PathBuf,
+    pub kind: DriveKind,
+    pub total: u64,
+    pub free: u64,
+}
+
+/// Drives with type and free space. Asks the drives themselves, so a stale network drive can
+/// block: call it from a worker thread, never from the UI thread.
+#[cfg(windows)]
+pub fn drive_infos() -> Vec<DriveInfo> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, GetDriveTypeW};
+
+    drives()
+        .into_iter()
+        .map(|root| {
+            let wide: Vec<u16> = root.as_os_str().encode_wide().chain(Some(0)).collect();
+            // SAFETY: `wide` is NUL-terminated; the out pointers are valid for the call.
+            let (kind, total, free) = unsafe {
+                let kind = match GetDriveTypeW(wide.as_ptr()) {
+                    2 => DriveKind::Removable,
+                    3 => DriveKind::Fixed,
+                    4 => DriveKind::Network,
+                    5 => DriveKind::Optical,
+                    _ => DriveKind::Other,
+                };
+                let (mut available, mut total, mut free) = (0u64, 0u64, 0u64);
+                if GetDiskFreeSpaceExW(wide.as_ptr(), &mut available, &mut total, &mut free) == 0 {
+                    (kind, 0, 0)
+                } else {
+                    (kind, total, available)
+                }
+            };
+            DriveInfo { root, kind, total, free }
+        })
+        .collect()
+}
+
+#[cfg(not(windows))]
+pub fn drive_infos() -> Vec<DriveInfo> {
+    drives().into_iter().map(|root| DriveInfo { root, kind: DriveKind::Fixed, total: 0, free: 0 }).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -79,6 +134,14 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
 
         assert_eq!(names, ["zeta", "alpha.txt", "Beta.txt"]);
+    }
+
+    #[test]
+    fn drive_infos_describe_the_drive_of_the_current_folder() {
+        let here = std::env::current_dir().unwrap();
+        let infos = drive_infos();
+        let mine = infos.iter().find(|d| here.starts_with(&d.root)).expect("current folder is on a listed drive");
+        assert!(mine.total > 0 && mine.free <= mine.total);
     }
 
     #[test]

@@ -5,7 +5,7 @@ use gc_core::filetype::Category;
 
 use crate::theme::{
     extensions_from_text, extensions_to_text, load_custom_themes, load_settings, resolve_icon, save_custom_theme, save_settings,
-    Settings, Theme,
+    Theme,
 };
 
 pub struct ThemeManager {
@@ -47,7 +47,9 @@ impl ThemeManager {
         self.extensions_text = extensions_to_text(&self.active.extensions);
         self.save_name = self.active.name.clone();
         self.active.apply(ctx);
-        self.message = save_settings(&Settings { theme: Some(self.active.name.clone()) }).err().map(|e| format!("Cannot remember theme: {e}"));
+        let mut settings = load_settings();
+        settings.theme = Some(self.active.name.clone());
+        self.message = save_settings(&settings).err().map(|e| format!("Cannot remember theme: {e}"));
     }
 
     pub fn show(&mut self, ctx: &egui::Context) {

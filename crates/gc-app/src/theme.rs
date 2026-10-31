@@ -248,9 +248,20 @@ pub fn extensions_from_text(text: &str) -> BTreeMap<String, String> {
 
 // ---- persistence -----------------------------------------------------------
 
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize)]
+#[serde(default)]
 pub struct Settings {
     pub theme: Option<String>,
+    /// Drive buttons above each panel.
+    pub drive_buttons: bool,
+    /// Free-space bar under each drive button.
+    pub drive_free_bar: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self { theme: None, drive_buttons: true, drive_free_bar: true }
+    }
 }
 
 pub fn config_dir() -> Option<PathBuf> {

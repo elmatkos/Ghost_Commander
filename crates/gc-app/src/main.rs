@@ -2,6 +2,8 @@
 #![windows_subsystem = "windows"]
 
 mod about;
+mod drive_bar;
+mod options;
 mod image_viewer;
 mod panel;
 mod shell_menu;
@@ -19,6 +21,7 @@ use gc_core::jobs::{self, Job, Op, Resolution};
 use about::About;
 use gc_archive::{ArchiveIndex, PackFormat};
 use panel::{FileUse, Panel, PanelAction};
+use options::Options;
 use theme_editor::ThemeManager;
 use image_viewer::ImageViewer;
 use viewer::Viewer;
@@ -50,6 +53,9 @@ struct App {
     apply_all: bool,
     about: About,
     themes: ThemeManager,
+    options: Options,
+    /// Drive list with free space, refreshed by a background thread (a dead network drive can block).
+    drives: Arc<std::sync::Mutex<Vec<gc_core::DriveInfo>>>,
     viewer: Viewer,
     images: ImageViewer,
     /// Archive files being extracted for F3 / F4 / Enter, with what to do when ready.
@@ -69,6 +75,8 @@ impl App {
             apply_all: false,
             about: About::default(),
             themes: ThemeManager::load(&cc.egui_ctx),
+            options: Options::load(),
+            drives: watch_drives(&cc.egui_ctx),
             viewer: Viewer::default(),
             images: ImageViewer::default(),
             extractions: Vec::new(),
@@ -553,11 +561,44 @@ impl eframe::App for App {
     }
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        let dialog_open = self.dialog.is_some() || self.about.open || self.themes.open || self.viewer.is_open() || self.jobs.iter().any(|j| j.job.progress.pending_conflict().is_some());
+        let dialog_open = self.dialog.is_some()
+            || self.about.open
+            || self.themes.open
+            || self.options.open
+            || self.viewer.is_open()
+            || self.jobs.iter().any(|j| j.job.progress.pending_conflict().is_some());
         if !dialog_open {
             self.handle_keys(ctx);
+            // Tab switches panels here. egui also uses it to move the keyboard focus to a button,
+            // where Enter or Space would then press it: keep nothing focused.
+            ctx.memory_mut(|m| {
+                if let Some(id) = m.focused() {
+                    m.surrender_focus(id);
+                }
+            });
         }
         self.poll_jobs();
+
+        egui::TopBottomPanel::top("menu").show(ctx, |ui| {
+            egui::menu::bar(ui, |ui| {
+                ui.menu_button("Config", |ui| {
+                    if ui.button("Options...").clicked() {
+                        self.options.open = true;
+                        ui.close_menu();
+                    }
+                    if ui.button("Themes...  (F9)").clicked() {
+                        self.themes.open = true;
+                        ui.close_menu();
+                    }
+                });
+                ui.menu_button("Help", |ui| {
+                    if ui.button("About  (F1)").clicked() {
+                        self.about.open = true;
+                        ui.close_menu();
+                    }
+                });
+            });
+        });
 
         egui::TopBottomPanel::bottom("bottom").show(ctx, |ui| {
             if let Some(s) = &self.status {
@@ -570,21 +611,21 @@ impl eframe::App for App {
                     ui.add_space(12.0);
                 }
                 ui.monospace("Tab switch | Space mark | Bksp up | Ctrl+1/2 drive");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("About (F1)").clicked() {
-                        self.about.open = true;
-                    }
-                    if ui.small_button("Themes (F9)").clicked() {
-                        self.themes.open = true;
-                    }
-                });
             });
         });
 
         let mut clicked: Option<usize> = None;
+        let mut bar_click: Option<(usize, drive_bar::Click)> = None;
+        let drives = self.drives.lock().map(|d| d.clone()).unwrap_or_default();
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.columns(2, |cols| {
                 for (i, col) in cols.iter_mut().enumerate() {
+                    if self.options.drive_buttons {
+                        if let Some(c) = drive_bar::show(col, &drives, &self.panels[i].cwd, &self.themes.active, self.options.drive_free_bar) {
+                            bar_click = Some((i, c));
+                        }
+                        col.add_space(2.0);
+                    }
                     if self.panels[i].ui(col, &format!("panel{i}"), self.active == i, &self.themes.active) {
                         clicked = Some(i);
                     }
@@ -594,6 +635,18 @@ impl eframe::App for App {
         if let Some(i) = clicked {
             self.active = i;
         }
+        if let Some((i, click)) = bar_click {
+            self.active = i;
+            match click {
+                drive_bar::Click::Drive(root) => self.panels[i].open_root(root),
+                drive_bar::Click::Root => {
+                    if let Some(root) = self.panels[i].cwd.ancestors().last().map(Path::to_path_buf) {
+                        self.panels[i].open_root(root);
+                    }
+                }
+                drive_bar::Click::Up => self.panels[i].go_up(),
+            }
+        }
         self.handle_panel_actions(ctx, frame);
         self.poll_extractions(ctx);
 
@@ -601,6 +654,7 @@ impl eframe::App for App {
         self.show_conflict(ctx);
         self.about.show(ctx);
         self.themes.show(ctx);
+        self.options.show(ctx);
         self.viewer.show(ctx);
         if let Some(err) = self.images.show(ctx) {
             self.status = Some(err);
@@ -640,4 +694,21 @@ fn install_icon_font(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
     ctx.set_fonts(fonts);
+}
+
+/// Keeps the drive list (letters, types, free space) fresh from a worker thread.
+fn watch_drives(ctx: &egui::Context) -> Arc<std::sync::Mutex<Vec<gc_core::DriveInfo>>> {
+    let shared = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (out, ctx) = (shared.clone(), ctx.clone());
+    std::thread::spawn(move || loop {
+        let fresh = gc_core::drive_infos();
+        if let Ok(mut current) = out.lock() {
+            if *current != fresh {
+                *current = fresh;
+                ctx.request_repaint();
+            }
+        }
+        std::thread::sleep(Duration::from_secs(3));
+    });
+    shared
 }
