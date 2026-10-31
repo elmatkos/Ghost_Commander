@@ -115,3 +115,34 @@ mod imp {
         DefSubclassProc(hwnd, msg, wparam, lparam)
     }
 }
+
+/// Opens `path` with whatever Windows has registered for it (the "open" verb): the image
+/// viewer for a picture, the program itself for an `.exe`. Does not wait for it to finish.
+#[cfg(windows)]
+pub fn open(path: &std::path::Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::{w, PCWSTR};
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let wide = |p: &std::path::Path| -> Vec<u16> { p.as_os_str().encode_wide().chain(Some(0)).collect() };
+    let file = wide(path);
+    // Programs expect to start in their own folder.
+    let dir = path.parent().map(wide);
+    // SAFETY: both buffers are NUL-terminated and outlive the call.
+    let result = unsafe {
+        ShellExecuteW(HWND::default(), w!("open"), PCWSTR(file.as_ptr()), PCWSTR::null(), dir.as_ref().map_or(PCWSTR::null(), |d| PCWSTR(d.as_ptr())), SW_SHOWNORMAL)
+    };
+    // Values above 32 mean success; below are error codes.
+    if result.0 as isize > 32 {
+        Ok(())
+    } else {
+        Err(format!("Windows could not open it (code {})", result.0 as isize))
+    }
+}
+
+#[cfg(not(windows))]
+pub fn open(path: &std::path::Path) -> Result<(), String> {
+    std::process::Command::new("xdg-open").arg(path).spawn().map(|_| ()).map_err(|e| e.to_string())
+}

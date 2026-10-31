@@ -30,6 +30,8 @@ struct Loading {
 pub enum PanelAction {
     /// Right click on disk items: show the Windows shell menu for them.
     ShellMenu(Vec<PathBuf>),
+    /// Enter on a plain file: open it with the Windows default program.
+    Open(PathBuf),
     /// Context menu of an archive item: extract the selection to the other panel.
     Extract,
 }
@@ -157,6 +159,8 @@ impl Panel {
         } else if gc_archive::is_archive(&e.path) {
             let path = e.path;
             self.start_loading(path.display().to_string(), false, move || gc_archive::open(&path));
+        } else {
+            self.action = Some(PanelAction::Open(e.path));
         }
     }
 

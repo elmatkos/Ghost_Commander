@@ -236,6 +236,10 @@ impl App {
                     // The menu may have deleted, renamed or created items.
                     self.reload_all();
                 }
+                Some(PanelAction::Open(path)) => {
+                    self.active = i;
+                    self.status = shell_menu::open(&path).err().map(|e| format!("{}: {e}", path.display()));
+                }
                 Some(PanelAction::Extract) => {
                     self.active = i;
                     self.open_dialog_for(Key::F5, false);

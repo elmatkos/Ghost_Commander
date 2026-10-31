@@ -103,7 +103,7 @@ mkv = "video"
 
 ## Archives
 
-Enter on a `.zip` or `.7z` opens it as a folder (browse, `..` leaves it); F5 extracts the marked items (or the one under the cursor) into the other panel's folder, with the same progress, cancel and conflict dialog as file copies. Names that could escape the destination (`..`, drive letters) are never listed or extracted. Archives inside archives open too: the inner file is extracted to a scratch folder in the background (header shows a spinner) and removed on exit. Archives open off the UI thread, and zip extraction runs on all cores. Alt+F5 packs the marked items (or the one under the cursor) into a new `.7z` or `.zip` in the other panel's folder (never overwrites; adding to an existing archive is not supported yet). Browsing archives stays read-only; tar/gz/xz and rar come next.
+Enter on any other file opens it with its Windows default program (pictures in the photo app, `.exe` runs, ...); Enter on a `.zip` or `.7z` opens it as a folder (browse, `..` leaves it); F5 extracts the marked items (or the one under the cursor) into the other panel's folder, with the same progress, cancel and conflict dialog as file copies. Names that could escape the destination (`..`, drive letters) are never listed or extracted. Archives inside archives open too: the inner file is extracted to a scratch folder in the background (header shows a spinner) and removed on exit. Archives open off the UI thread, and zip extraction runs on all cores. Alt+F5 packs the marked items (or the one under the cursor) into a new `.7z` or `.zip` in the other panel's folder (never overwrites; adding to an existing archive is not supported yet). Browsing archives stays read-only; tar/gz/xz and rar come next.
 
 ## Context menu and Delete
 
