@@ -26,12 +26,22 @@ struct Loading {
     nested: bool,
 }
 
+/// What to do with a file once it is on disk.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum FileUse {
+    Open,
+    View,
+    Edit,
+}
+
 /// Something the user asked for that only the app can do (it owns the other panel and the jobs).
 pub enum PanelAction {
     /// Right click on disk items: show the Windows shell menu for them.
     ShellMenu(Vec<PathBuf>),
     /// Enter on a plain file: open it with the Windows default program.
     Open(PathBuf),
+    /// A file inside an archive: extract it to the scratch folder, then use it.
+    ArchiveFile { index: Arc<ArchiveIndex>, inner: String, mode: FileUse },
     /// Context menu of an archive item: extract the selection to the other panel.
     Extract,
 }
@@ -153,6 +163,10 @@ impl Panel {
                 let inner = join_inner(&a.inner, &e.name);
                 let label = format!("{}\\{}", self.location(), e.name);
                 self.start_loading(label, true, move || gc_archive::open_nested(&index, &inner));
+            } else {
+                let index = a.index.clone();
+                let inner = join_inner(&a.inner, &e.name);
+                self.action = Some(PanelAction::ArchiveFile { index, inner, mode: FileUse::Open });
             }
         } else if e.is_dir {
             self.go_to(e.path, None);
@@ -307,6 +321,13 @@ impl Panel {
     pub fn current_file(&self) -> Option<PathBuf> {
         let e = self.entries.get(self.cursor)?;
         (self.archive.is_none() && !e.is_dir && e.name != PARENT).then(|| e.path.clone())
+    }
+
+    /// The plain file under the cursor while an archive is open: archive and inner path.
+    pub fn archive_file(&self) -> Option<(Arc<ArchiveIndex>, String)> {
+        let a = self.archive.as_ref()?;
+        let e = self.entries.get(self.cursor).filter(|e| !e.is_dir && e.name != PARENT)?;
+        Some((a.index.clone(), join_inner(&a.inner, &e.name)))
     }
 
     /// Images of the shown folder in listing order, for browsing in the image viewer.

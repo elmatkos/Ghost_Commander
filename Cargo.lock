@@ -1321,7 +1321,7 @@ dependencies = [
 
 [[package]]
 name = "gc-app"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "chrono",
  "eframe",
@@ -1339,7 +1339,7 @@ dependencies = [
 
 [[package]]
 name = "gc-archive"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "chrono",
  "flate2",
@@ -1353,7 +1353,7 @@ dependencies = [
 
 [[package]]
 name = "gc-core"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "trash",
  "windows-sys 0.59.0",

@@ -18,7 +18,7 @@ use eframe::egui::{self, Key};
 use gc_core::jobs::{self, Job, Op, Resolution};
 use about::About;
 use gc_archive::{ArchiveIndex, PackFormat};
-use panel::{Panel, PanelAction};
+use panel::{FileUse, Panel, PanelAction};
 use theme_editor::ThemeManager;
 use image_viewer::ImageViewer;
 use viewer::Viewer;
@@ -31,7 +31,7 @@ enum Dialog {
     /// Extract inner paths of an archive into a folder.
     Extract { index: Arc<ArchiveIndex>, names: Vec<String>, dest: PathBuf },
     /// Pack items into a new archive `name.ext` in `dest_dir`.
-    Pack { srcs: Vec<PathBuf>, dest_dir: PathBuf, name: String, format: PackFormat },
+    Pack { srcs: Vec<PathBuf>, dest_dir: String, name: String, format: PackFormat },
 }
 
 struct RunningJob {
@@ -52,6 +52,8 @@ struct App {
     themes: ThemeManager,
     viewer: Viewer,
     images: ImageViewer,
+    /// Archive files being extracted for F3 / F4 / Enter, with what to do when ready.
+    extractions: Vec<(std::sync::mpsc::Receiver<std::io::Result<PathBuf>>, FileUse)>,
 }
 
 impl App {
@@ -69,30 +71,75 @@ impl App {
             themes: ThemeManager::load(&cc.egui_ctx),
             viewer: Viewer::default(),
             images: ImageViewer::default(),
+            extractions: Vec::new(),
         }
     }
 
     /// F3: built-in viewer. F4: external editor.
     fn view_or_edit(&mut self, ctx: &egui::Context, edit: bool) {
+        let mode = if edit { FileUse::Edit } else { FileUse::View };
+        if let Some((index, inner)) = self.panels[self.active].archive_file() {
+            return self.extract_then_use(ctx, index, inner, mode);
+        }
         let Some(file) = self.panels[self.active].current_file() else {
-            self.status = Some("Select a file on disk first (archives and folders are not supported yet).".into());
+            self.status = Some("Select a file first (folders cannot be viewed).".into());
             return;
         };
+        let siblings = self.panels[self.active].image_files();
+        self.use_file(ctx, file, mode, siblings);
+    }
+
+    /// Views, edits or opens a file that is on disk.
+    fn use_file(&mut self, ctx: &egui::Context, file: PathBuf, mode: FileUse, siblings: Vec<PathBuf>) {
         self.status = None;
-        let result = if edit {
-            #[cfg(windows)]
-            let editor = "notepad";
-            #[cfg(not(windows))]
-            let editor = "xdg-open";
-            std::process::Command::new(editor).arg(&file).spawn().map(|_| ())
-        } else if image_viewer::is_image(&file) {
-            self.images.open(ctx, &file, self.panels[self.active].image_files());
-            Ok(())
-        } else {
-            self.viewer.open(&file)
+        let result = match mode {
+            FileUse::Edit => {
+                #[cfg(windows)]
+                let editor = "notepad";
+                #[cfg(not(windows))]
+                let editor = "xdg-open";
+                std::process::Command::new(editor).arg(&file).spawn().map(|_| ())
+            }
+            FileUse::View if image_viewer::is_image(&file) => {
+                self.images.open(ctx, &file, siblings);
+                Ok(())
+            }
+            FileUse::View => self.viewer.open(&file),
+            FileUse::Open => shell_menu::open(&file).map_err(std::io::Error::other),
         };
         if let Err(e) = result {
             self.status = Some(format!("{}: {e}", file.display()));
+        }
+    }
+
+    /// File inside an archive: extract it to the scratch folder on a worker thread, then
+    /// `use_file` it (see `poll_extractions`).
+    fn extract_then_use(&mut self, ctx: &egui::Context, index: Arc<ArchiveIndex>, inner: String, mode: FileUse) {
+        self.status = Some(format!("Extracting {inner} ..."));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(gc_archive::extract_to_scratch(&index, &inner));
+            ctx.request_repaint();
+        });
+        self.extractions.push((rx, mode));
+    }
+
+    fn poll_extractions(&mut self, ctx: &egui::Context) {
+        let mut finished = Vec::new();
+        self.extractions.retain(|(rx, mode)| match rx.try_recv() {
+            Err(std::sync::mpsc::TryRecvError::Empty) => true,
+            Ok(result) => {
+                finished.push((result, *mode));
+                false
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => false,
+        });
+        for (result, mode) in finished {
+            match result {
+                Ok(file) => self.use_file(ctx, file.clone(), mode, vec![file]),
+                Err(e) => self.status = Some(format!("Extract failed: {e}")),
+            }
         }
     }
 
@@ -143,7 +190,7 @@ impl App {
         let dest_dir = self.panels[1 - self.active].disk_folder().or_else(|| panel.disk_folder()).map(Path::to_path_buf);
         match dest_dir {
             Some(dest_dir) if panel.disk_folder().is_some() && !srcs.is_empty() => {
-                self.dialog = Some(Dialog::Pack { srcs, dest_dir, name: panel.pack_name(), format: PackFormat::SevenZip });
+                self.dialog = Some(Dialog::Pack { srcs, dest_dir: dest_dir.display().to_string(), name: panel.pack_name(), format: PackFormat::SevenZip });
             }
             _ => self.status = Some("Select files or folders on disk to pack.".into()),
         }
@@ -224,7 +271,7 @@ impl App {
     }
 
     /// Right-click requests raised by the panels while drawing.
-    fn handle_panel_actions(&mut self, frame: &eframe::Frame) {
+    fn handle_panel_actions(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
         for i in 0..2 {
             match self.panels[i].action.take() {
                 Some(PanelAction::ShellMenu(paths)) => {
@@ -239,6 +286,10 @@ impl App {
                 Some(PanelAction::Open(path)) => {
                     self.active = i;
                     self.status = shell_menu::open(&path).err().map(|e| format!("{}: {e}", path.display()));
+                }
+                Some(PanelAction::ArchiveFile { index, inner, mode }) => {
+                    self.active = i;
+                    self.extract_then_use(ctx, index, inner, mode);
                 }
                 Some(PanelAction::Extract) => {
                     self.active = i;
@@ -297,10 +348,13 @@ impl App {
                     keep = Some(Dialog::Extract { index, names, dest });
                 }
             }
-            Dialog::Pack { srcs, dest_dir, mut name, mut format } => {
-                let target = dest_dir.join(format!("{}.{}", name.trim(), format.extension()));
+            Dialog::Pack { srcs, mut dest_dir, mut name, mut format } => {
+                let folder = PathBuf::from(dest_dir.trim());
+                let target = folder.join(format!("{}.{}", name.trim(), format.extension()));
                 let problem = if name.trim().is_empty() || name.contains(['\\', '/', ':']) {
                     Some("Enter a plain file name.")
+                } else if !folder.is_dir() {
+                    Some("That folder does not exist.")
                 } else if target.exists() {
                     Some("That archive already exists.")
                 } else {
@@ -309,8 +363,14 @@ impl App {
                 let mut ok = enter && problem.is_none();
                 let mut cancel = escape;
                 egui::Window::new("Pack").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
-                    ui.label(format!("Pack {} item(s) into", srcs.len()));
-                    ui.add(egui::TextEdit::singleline(&mut name)).request_focus();
+                    ui.label(format!("Pack {} item(s) into folder", srcs.len()));
+                    ui.add(egui::TextEdit::singleline(&mut dest_dir).desired_width(480.0));
+                    ui.label("as archive");
+                    let name_edit = ui.add(egui::TextEdit::singleline(&mut name).desired_width(480.0));
+                    // The name field starts focused; clicking the folder field moves the focus away for good.
+                    if ctx.memory(|m| m.focused().is_none()) {
+                        name_edit.request_focus();
+                    }
                     ui.horizontal(|ui| {
                         for f in PackFormat::ALL {
                             ui.radio_value(&mut format, f, f.extension());
@@ -534,7 +594,8 @@ impl eframe::App for App {
         if let Some(i) = clicked {
             self.active = i;
         }
-        self.handle_panel_actions(frame);
+        self.handle_panel_actions(ctx, frame);
+        self.poll_extractions(ctx);
 
         self.show_dialog(ctx);
         self.show_conflict(ctx);

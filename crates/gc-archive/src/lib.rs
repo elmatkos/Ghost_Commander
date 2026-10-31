@@ -331,10 +331,10 @@ fn nested_root() -> PathBuf {
     std::env::temp_dir().join("Ghost Commander").join(format!("nested-{}", std::process::id()))
 }
 
-/// Opens an archive stored inside `parent` (at inner path `inner`): it is extracted to a
-/// scratch folder first, then indexed like any other archive. Slow for big files, so call it
-/// off the UI thread. The scratch folder is removed by [`cleanup_nested`].
-pub fn open_nested(parent: &ArchiveIndex, inner: &str) -> io::Result<ArchiveIndex> {
+/// Extracts one file of `parent` (inner path `inner`) into a fresh scratch folder and returns
+/// its path, so it can be viewed, edited or opened like any file on disk. Slow for big files,
+/// so call it off the UI thread. Scratch folders are removed by [`cleanup_nested`].
+pub fn extract_to_scratch(parent: &ArchiveIndex, inner: &str) -> io::Result<PathBuf> {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let dir = nested_root().join(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed).to_string());
     fs::create_dir_all(&dir)?;
@@ -343,8 +343,13 @@ pub fn open_nested(parent: &ArchiveIndex, inner: &str) -> io::Result<ArchiveInde
     if let Some(e) = p.errors().into_iter().next() {
         return Err(io::Error::other(e));
     }
-    let name = inner.rsplit('/').next().unwrap_or(inner);
-    open(&dir.join(name))
+    Ok(dir.join(inner.rsplit('/').next().unwrap_or(inner)))
+}
+
+/// Opens an archive stored inside `parent` (at inner path `inner`) after extracting it to the
+/// scratch folder. Call off the UI thread.
+pub fn open_nested(parent: &ArchiveIndex, inner: &str) -> io::Result<ArchiveIndex> {
+    open(&extract_to_scratch(parent, inner)?)
 }
 
 /// Deletes the scratch folder of [`open_nested`]; call on exit.
@@ -407,9 +412,15 @@ fn walk(path: &Path, name: String, out: &mut Vec<PackItem>, p: &Progress) {
 }
 
 /// Counts bytes into the progress and aborts the read when the job is cancelled.
+/// Share of the input counted as done while a compressor may still lag behind the reads;
+/// the rest is added when the archive is finished, so the bar does not sit at 100% early.
+const COMPRESSED_PERCENT: u64 = 90;
+
 struct CountingReader<'a, R> {
     inner: R,
     p: &'a Progress,
+    /// Percent of each read added to the progress (100 = exact).
+    percent: u64,
 }
 
 impl<R: io::Read> io::Read for CountingReader<'_, R> {
@@ -418,7 +429,7 @@ impl<R: io::Read> io::Read for CountingReader<'_, R> {
             return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
         }
         let n = self.inner.read(buf)?;
-        self.p.done.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+        self.p.done.fetch_add(n as u64 * self.percent / 100, std::sync::atomic::Ordering::Relaxed);
         Ok(n)
     }
 }
@@ -444,13 +455,22 @@ pub fn pack(format: PackFormat, srcs: &[PathBuf], dest: &Path, p: &Progress) {
         PackFormat::TarGz => pack_tar(&items, dest, Compression::Gzip, p),
         PackFormat::TarXz => pack_tar(&items, dest, Compression::Xz, p),
     };
-    if let Err(e) = result {
-        if e.kind() != io::ErrorKind::Interrupted {
-            p.fail(format!("{}: {e}", dest.display()));
+    match result {
+        Ok(()) if !p.cancelled() => {
+            // Compressors lag behind the reads, so the bar only reaches 100% here.
+            p.done.store(p.total.load(std::sync::atomic::Ordering::Relaxed), std::sync::atomic::Ordering::Relaxed);
         }
-    }
-    if p.cancelled() || !p.errors().is_empty() && !dest.exists() {
-        let _ = fs::remove_file(dest);
+        Ok(()) => {
+            let _ = fs::remove_file(dest);
+        }
+        // Somebody else's file: report it, never delete it.
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => p.fail(format!("{}: {e}", dest.display())),
+        Err(e) => {
+            if e.kind() != io::ErrorKind::Interrupted {
+                p.fail(format!("{}: {e}", dest.display()));
+            }
+            let _ = fs::remove_file(dest);
+        }
     }
 }
 
@@ -476,33 +496,57 @@ fn pack_zip(items: &[PackItem], dest: &Path, p: &Progress) -> io::Result<()> {
             }
         };
         w.start_file(&item.name, options).map_err(io::Error::other)?;
-        io::copy(&mut CountingReader { inner: file, p }, &mut w)?;
+        io::copy(&mut CountingReader { inner: file, p, percent: 100 }, &mut w)?;
     }
     w.finish().map_err(io::Error::other)?;
     Ok(())
 }
 
+/// Opens its file on the first read and closes it at the end, so a solid 7z block over
+/// thousands of files never holds thousands of handles.
+struct LazyFile<'a> {
+    path: &'a Path,
+    file: Option<File>,
+    p: &'a Progress,
+}
+
+impl io::Read for LazyFile<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.file.is_none() {
+            self.file = Some(File::open(self.path).map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", self.path.display())))?);
+        }
+        let mut counted = CountingReader { inner: self.file.as_mut().expect("opened above"), p: self.p, percent: COMPRESSED_PERCENT };
+        let n = io::Read::read(&mut counted, buf)?;
+        if n == 0 {
+            self.file = None;
+        }
+        Ok(n)
+    }
+}
+
+/// One solid block compressed by all cores: much faster than a block per file (no encoder
+/// start-up per file) and it compresses small files together.
 fn pack_7z(items: &[PackItem], dest: &Path, p: &Progress) -> io::Result<()> {
     // `create` would silently replace an existing file.
     drop(fs::OpenOptions::new().write(true).create_new(true).open(dest)?);
-    let mut w = sevenz_rust2::ArchiveWriter::create(dest).map_err(|e| io::Error::other(e.to_string()))?;
+    let other = |e: sevenz_rust2::Error| io::Error::other(e.to_string());
+    let mut w = sevenz_rust2::ArchiveWriter::create(dest).map_err(other)?;
+    let threads = std::thread::available_parallelism().map_or(2, |n| n.get() as u32);
+    w.set_content_methods(vec![sevenz_rust2::encoder_options::Lzma2Options::from_level_mt(5, threads, 8 << 20).into()]);
+
+    let mut entries = Vec::new();
+    let mut readers = Vec::new();
     for item in items {
-        if p.cancelled() {
-            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
-        }
         let entry = sevenz_rust2::ArchiveEntry::from_path(&item.path, item.name.clone());
-        let reader = if item.is_dir {
-            None
+        if item.is_dir {
+            w.push_archive_entry(entry, None::<io::Empty>).map_err(other)?;
         } else {
-            match File::open(&item.path) {
-                Ok(f) => Some(CountingReader { inner: f, p }),
-                Err(e) => {
-                    p.fail(format!("{}: {e}", item.path.display()));
-                    continue;
-                }
-            }
-        };
-        w.push_archive_entry(entry, reader).map_err(|e| io::Error::other(e.to_string()))?;
+            entries.push(entry);
+            readers.push(sevenz_rust2::SourceReader::new(LazyFile { path: &item.path, file: None, p }));
+        }
+    }
+    if !entries.is_empty() {
+        w.push_archive_entries(entries, readers).map_err(other)?;
     }
     w.finish()?;
     Ok(())
@@ -512,20 +556,20 @@ fn pack_tar(items: &[PackItem], dest: &Path, compression: Compression, p: &Progr
     use std::io::Write;
     let out = io::BufWriter::new(fs::OpenOptions::new().write(true).create_new(true).open(dest)?);
     match compression {
-        Compression::None => tar_items(items, out, p)?.flush(),
-        Compression::Gzip => tar_items(items, flate2::write::GzEncoder::new(out, flate2::Compression::default()), p)?.finish()?.flush(),
+        Compression::None => tar_items(items, out, 100, p)?.flush(),
+        Compression::Gzip => tar_items(items, flate2::write::GzEncoder::new(out, flate2::Compression::default()), 100, p)?.finish()?.flush(),
         Compression::Xz => {
             // Independent blocks let every core compress a slice at the same time.
-            let mut options = lzma_rust2::XzOptions::with_preset(6);
+            let mut options = lzma_rust2::XzOptions::with_preset(5);
             options.set_block_size(std::num::NonZeroU64::new(8 << 20));
             let workers = std::thread::available_parallelism().map_or(2, |n| n.get() as u32);
             let writer = lzma_rust2::XzWriterMt::new(out, options, workers).map_err(io::Error::other)?;
-            tar_items(items, writer, p)?.finish().map_err(io::Error::other)?.flush()
+            tar_items(items, writer, COMPRESSED_PERCENT, p)?.finish().map_err(io::Error::other)?.flush()
         }
     }
 }
 
-fn tar_items<W: io::Write>(items: &[PackItem], out: W, p: &Progress) -> io::Result<W> {
+fn tar_items<W: io::Write>(items: &[PackItem], out: W, percent: u64, p: &Progress) -> io::Result<W> {
     let mut builder = tar::Builder::new(out);
     for item in items {
         if p.cancelled() {
@@ -545,7 +589,7 @@ fn tar_items<W: io::Write>(items: &[PackItem], out: W, p: &Progress) -> io::Resu
             continue;
         }
         match File::open(&item.path) {
-            Ok(f) => builder.append_data(&mut header, &item.name, CountingReader { inner: f, p })?,
+            Ok(f) => builder.append_data(&mut header, &item.name, CountingReader { inner: f, p, percent })?,
             Err(e) => p.fail(format!("{}: {e}", item.path.display())),
         }
     }
