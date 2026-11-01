@@ -74,6 +74,54 @@ pub fn write_crc_file(file: &std::path::Path, d: &Digests) -> io::Result<PathBuf
     Ok(target)
 }
 
+impl Digests {
+    /// The checksum whose hex length is `len` (8 CRC-32, 32 MD5, 40 SHA-1, 64 SHA-256).
+    pub fn by_len(&self, len: usize) -> Option<&str> {
+        match len {
+            8 => Some(&self.crc32),
+            32 => Some(&self.md5),
+            40 => Some(&self.sha1),
+            64 => Some(&self.sha256),
+            _ => None,
+        }
+    }
+}
+
+/// One line of a checksum file: the file it names and the expected checksum (lower case hex).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Expected {
+    pub name: String,
+    pub value: String,
+}
+
+/// True for the checksum file types we can verify (`.crc .sfv .md5 .sha1 .sha256`).
+pub fn is_checksum_file(path: &std::path::Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| ["crc", "sfv", "md5", "sha1", "sha256"].iter().any(|x| e.eq_ignore_ascii_case(x)))
+}
+
+fn is_digest(s: &str) -> bool {
+    matches!(s.len(), 8 | 32 | 40 | 64) && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Parses SFV (`name CRC`), `md5sum`/`sha256sum` (`hash  name`, `hash *name`) and bare-hash files.
+/// `default_name` names the file when a line holds only a hash.
+pub fn parse_checksum_file(text: &str, default_name: &str) -> Vec<Expected> {
+    let mut out = Vec::new();
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with(';') && !l.starts_with('#')) {
+        let (first, rest) = line.split_once(char::is_whitespace).map_or((line, ""), |(a, b)| (a, b.trim_start()));
+        let item = if is_digest(first) {
+            let name = rest.strip_prefix('*').unwrap_or(rest);
+            Some((if name.is_empty() { default_name } else { name }, first))
+        } else {
+            line.rsplit_once(char::is_whitespace).filter(|(_, crc)| is_digest(crc)).map(|(name, crc)| (name.trim(), crc))
+        };
+        if let Some((name, value)) = item {
+            out.push(Expected { name: name.to_string(), value: value.to_lowercase() });
+        }
+    }
+    out
+}
+
 /// One file of a [`HashJob`].
 pub struct FileHash {
     pub path: PathBuf,
@@ -171,6 +219,20 @@ mod tests {
         assert!(r.is_none());
     }
 
+
+    #[test]
+    fn parses_checksum_files() {
+        let sfv = "; made by x\r\nfine.name.ext 352441C2\r\nother file.bin  DEADBEEF\r\n";
+        let v = parse_checksum_file(sfv, "d");
+        assert_eq!(v, vec![Expected { name: "fine.name.ext".into(), value: "352441c2".into() }, Expected { name: "other file.bin".into(), value: "deadbeef".into() }]);
+        let sum = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad *a.txt\n900150983cd24fb0d6963f7d28e17f72  b c.txt\n";
+        let v = parse_checksum_file(sum, "d");
+        assert_eq!((v[0].name.as_str(), v[0].value.len(), v[1].name.as_str()), ("a.txt", 64, "b c.txt"));
+        let bare = parse_checksum_file("A9993E364706816ABA3E25717850C26C9CD0D89D\n", "x.iso");
+        assert_eq!(bare[0].name, "x.iso");
+        assert!(parse_checksum_file("garbage line here", "d").is_empty());
+        assert!(is_checksum_file(std::path::Path::new("a.SFV")) && !is_checksum_file(std::path::Path::new("a.txt")));
+    }
     #[test]
     fn crc_file_is_named_after_source() {
         let dir = std::env::temp_dir().join(format!("gc-crc-test-{}", std::process::id()));

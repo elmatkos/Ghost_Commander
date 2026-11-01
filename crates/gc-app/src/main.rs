@@ -11,6 +11,7 @@ mod shell_menu;
 mod sysinfo_window;
 mod theme;
 mod theme_editor;
+mod verify_window;
 mod viewer;
 
 use std::path::{Path, PathBuf};
@@ -25,6 +26,7 @@ use gc_archive::{ArchiveIndex, PackFormat};
 use panel::{FileUse, Panel, PanelAction, SortKey};
 use options::Options;
 use checksums_window::ChecksumsWindow;
+use verify_window::VerifyWindow;
 use sysinfo_window::SysInfoWindow;
 use theme_editor::ThemeManager;
 use image_viewer::ImageViewer;
@@ -60,6 +62,7 @@ struct App {
     options: Options,
     sysinfo: SysInfoWindow,
     checksums: ChecksumsWindow,
+    verify: VerifyWindow,
     /// Drive list with free space, refreshed by a background thread (a dead network drive can block).
     drives: Arc<std::sync::Mutex<Vec<gc_core::DriveInfo>>>,
     viewer: Viewer,
@@ -84,6 +87,7 @@ impl App {
             options: Options::load(),
             sysinfo: SysInfoWindow::default(),
             checksums: ChecksumsWindow::default(),
+            verify: VerifyWindow::default(),
             drives: watch_drives(&cc.egui_ctx),
             viewer: Viewer::default(),
             images: ImageViewer::default(),
@@ -342,7 +346,11 @@ impl App {
                 }
                 Some(PanelAction::Open(path)) => {
                     self.active = i;
-                    self.status = shell_menu::open(&path).err().map(|e| format!("{}: {e}", path.display()));
+                    if gc_core::hash::is_checksum_file(&path) {
+                        self.verify.start(ctx, &path);
+                    } else {
+                        self.status = shell_menu::open(&path).err().map(|e| format!("{}: {e}", path.display()));
+                    }
                 }
                 Some(PanelAction::ArchiveFile { index, inner, mode }) => {
                     self.active = i;
@@ -616,6 +624,7 @@ impl eframe::App for App {
             || self.options.open
             || self.sysinfo.open
             || self.checksums.open
+            || self.verify.open
             || self.viewer.is_open()
             || self.jobs.iter().any(|j| j.job.progress.pending_conflict().is_some());
         if !dialog_open {
@@ -722,6 +731,7 @@ impl eframe::App for App {
         self.options.show(ctx);
         self.sysinfo.show(ctx, &self.themes.active);
         self.checksums.show(ctx, &self.themes.active);
+        self.verify.show(ctx, &self.themes.active);
         self.viewer.show(ctx);
         if let Some(err) = self.images.show(ctx) {
             self.status = Some(err);
