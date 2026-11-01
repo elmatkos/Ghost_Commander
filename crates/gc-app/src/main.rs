@@ -729,13 +729,7 @@ impl eframe::App for App {
                 ui.colored_label(self.themes.active.error.0, s);
             }
             self.show_jobs(ui);
-            ui.horizontal(|ui| {
-                for (key, label) in [("F3", "View"), ("F4", "Edit"), ("Shift+F4", "NewFile"), ("F5", "Copy"), ("F6", "Move"), ("Alt+F5", "Pack"), ("F7", "MkDir"), ("F8/Del", "Recycle"), ("Shift+F8/Del", "Delete")] {
-                    ui.monospace(format!("{key} {label}"));
-                    ui.add_space(12.0);
-                }
-                ui.monospace("Tab switch | Space mark | Bksp up | Ctrl+R refresh | Ctrl+1/2 drive");
-            });
+            show_hints(ui);
         });
 
         let mut clicked: Option<usize> = None;
@@ -794,6 +788,69 @@ impl eframe::App for App {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
     }
+}
+
+/// Shortcut hints for the bottom line, grouped by the modifier keys that must be held.
+/// (ctrl, shift, alt, [(key, label)]). The group matching the keys held right now is shown.
+type Hint = (&'static str, &'static str);
+const HINTS: [(bool, bool, bool, &[Hint]); 4] = [
+    (
+        false,
+        false,
+        false,
+        &[
+            ("F1", "About"),
+            ("F3", "View"),
+            ("F4", "Edit"),
+            ("F5", "Copy"),
+            ("F6", "Move"),
+            ("F7", "MkDir"),
+            ("F8/Del", "Recycle"),
+            ("F9", "Themes"),
+            ("Tab", "Switch"),
+            ("Space", "Mark"),
+            ("Bksp", "Up"),
+        ],
+    ),
+    (false, true, false, &[("Shift+F4", "New file"), ("Shift+F8/Del", "Delete")]),
+    (
+        true,
+        false,
+        false,
+        &[
+            ("Ctrl+R", "Refresh"),
+            ("Ctrl+F", "Filter"),
+            ("Ctrl+H", "Checksums"),
+            ("Ctrl+1/2", "Drive"),
+            ("Ctrl+F3", "Sort name"),
+            ("Ctrl+F4", "Sort ext"),
+            ("Ctrl+F5", "Sort date"),
+            ("Ctrl+F6", "Sort size"),
+        ],
+    ),
+    (false, false, true, &[("Alt+F5", "Pack")]),
+];
+
+/// Draws the hints for the held modifiers, as many as fit into the width of `ui`.
+fn show_hints(ui: &mut egui::Ui) {
+    let m = ui.input(|i| i.modifiers);
+    let Some((_, _, _, items)) = HINTS.iter().find(|(c, s, a, _)| (*c, *s, *a) == (m.ctrl, m.shift, m.alt)) else { return };
+    let font = egui::TextStyle::Monospace.resolve(ui.style());
+    let color = ui.visuals().text_color();
+    let gap = 12.0;
+    let mut left = ui.available_width();
+    ui.horizontal(|ui| {
+        for (key, label) in *items {
+            let text = format!("{key} {label}");
+            let w = ui.fonts(|f| f.layout_no_wrap(text.clone(), font.clone(), color).size().x);
+            if w > left {
+                break;
+            }
+            ui.monospace(text);
+            ui.add_space(gap);
+            left -= w + gap + ui.spacing().item_spacing.x;
+        }
+    });
 }
 
 fn main() -> eframe::Result<()> {

@@ -126,3 +126,5 @@ Ctrl+H (or Tools > Checksums) calculates CRC-32, MD5, SHA-1 and SHA-256 of the m
 Enter on a `.crc`, `.sfv`, `.md5`, `.sha1` or `.sha256` file verifies it: every file it lists (looked up next to the checksum file) is hashed in parallel and shown as OK, FAILED (with expected and actual value) or MISSING. SFV, `md5sum`/`sha256sum` and bare-hash files are understood; the algorithm follows the hash length.
 
 Panels refresh themselves when files appear, disappear or are renamed in the shown folder (checked once a second); Ctrl+R refreshes at once. Shift+F4 asks for a name, creates an empty file there and opens it in the editor.
+
+The bottom line shows only the shortcuts for the modifier keys you hold: plain keys normally, the Shift ones while Shift is held, likewise Ctrl and Alt. Only as many as fit the window width are shown.
