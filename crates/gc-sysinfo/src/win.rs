@@ -139,7 +139,7 @@ fn pci_display_adapters() -> Vec<(String, PciId)> {
             let Some(pci) = parse_pci_id(&from_wide(&id)) else { continue };
             let mut name = [0u8; 512];
             let name = match SetupDiGetDeviceRegistryPropertyW(set, &data, SPDRP_DEVICEDESC, None, Some(&mut name), None) {
-                Ok(()) => from_wide(&name.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect::<Vec<_>>()),
+                Ok(()) => from_wide(&name.chunks(2).filter(|c| c.len() == 2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect::<Vec<_>>()),
                 Err(_) => "Display adapter".to_owned(),
             };
             out.push((name, pci));
