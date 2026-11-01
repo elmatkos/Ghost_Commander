@@ -103,23 +103,84 @@ pub struct Gpu {
     pub vram: u64,
 }
 
-/// Hardware graphics adapters (the software "Basic Render Driver" is skipped).
-pub fn gpus() -> Vec<Gpu> {
+/// PCI id of a display adapter: (vendor, device, subsystem) from `PCI\VEN_xxxx&DEV_xxxx&SUBSYS_xxxxxxxx&...`.
+type PciId = (u32, u32, u32);
+
+fn parse_pci_id(instance_id: &str) -> Option<PciId> {
+    let rest = instance_id.strip_prefix("PCI\\")?;
+    let field = |tag: &str| rest.split('&').find_map(|p| p.strip_prefix(tag)).and_then(|h| u32::from_str_radix(&h[..h.find('\\').unwrap_or(h.len())], 16).ok());
+    Some((field("VEN_")?, field("DEV_")?, field("SUBSYS_").unwrap_or(0)))
+}
+
+/// Display adapters that are really present on the PCI bus: one entry per physical card.
+/// Virtual display drivers (headset links, remote desktop) show up in DXGI as extra adapters
+/// of the same GPU, but not here.
+fn pci_display_adapters() -> Vec<(String, PciId)> {
+    use windows::Win32::Devices::DeviceAndDriverInstallation::{
+        SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo, SetupDiGetClassDevsW, SetupDiGetDeviceInstanceIdW, SetupDiGetDeviceRegistryPropertyW, DIGCF_PRESENT, GUID_DEVCLASS_DISPLAY, SP_DEVINFO_DATA, SPDRP_DEVICEDESC,
+    };
+    use windows::Win32::Foundation::HWND;
+
     let mut out = Vec::new();
+    // SAFETY: the info set is destroyed before returning; buffers are sized by their slices.
+    unsafe {
+        let Ok(set) = SetupDiGetClassDevsW(Some(&GUID_DEVCLASS_DISPLAY), PCWSTR::null(), HWND::default(), DIGCF_PRESENT) else { return out };
+        let mut index = 0;
+        loop {
+            let mut data = SP_DEVINFO_DATA { cbSize: size_of::<SP_DEVINFO_DATA>() as u32, ..Default::default() };
+            if SetupDiEnumDeviceInfo(set, index, &mut data).is_err() {
+                break;
+            }
+            index += 1;
+            let mut id = [0u16; 400];
+            if SetupDiGetDeviceInstanceIdW(set, &data, Some(&mut id), None).is_err() {
+                continue;
+            }
+            let Some(pci) = parse_pci_id(&from_wide(&id)) else { continue };
+            let mut name = [0u8; 512];
+            let name = match SetupDiGetDeviceRegistryPropertyW(set, &data, SPDRP_DEVICEDESC, None, Some(&mut name), None) {
+                Ok(()) => from_wide(&name.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect::<Vec<_>>()),
+                Err(_) => "Display adapter".to_owned(),
+            };
+            out.push((name, pci));
+        }
+        let _ = SetupDiDestroyDeviceInfoList(set);
+    }
+    out
+}
+
+/// Graphics cards with their dedicated memory. The cards come from the PCI bus (so a virtual
+/// display driver does not double a card), the memory size from DXGI.
+pub fn gpus() -> Vec<Gpu> {
+    // (name, pci id, dedicated memory) of the DXGI hardware adapters.
+    let mut dxgi = Vec::new();
     // SAFETY: plain COM calls on interfaces we own.
     unsafe {
-        let Ok(factory) = CreateDXGIFactory1::<IDXGIFactory1>() else { return out };
-        let mut i = 0;
-        while let Ok(adapter) = factory.EnumAdapters1(i) {
-            i += 1;
-            if let Ok(d) = adapter.GetDesc1() {
-                if d.Flags & 2 == 0 {
-                    out.push(Gpu { name: from_wide(&d.Description), vram: d.DedicatedVideoMemory as u64 });
+        if let Ok(factory) = CreateDXGIFactory1::<IDXGIFactory1>() {
+            let mut i = 0;
+            while let Ok(adapter) = factory.EnumAdapters1(i) {
+                i += 1;
+                if let Ok(d) = adapter.GetDesc1() {
+                    if d.Flags & 2 == 0 {
+                        dxgi.push((from_wide(&d.Description), (d.VendorId, d.DeviceId, d.SubSysId), d.DedicatedVideoMemory as u64));
+                    }
                 }
             }
         }
     }
-    out
+    let pci = pci_display_adapters();
+    if pci.is_empty() {
+        // No PnP data: fall back to DXGI, merging the identical duplicates a virtual driver causes.
+        dxgi.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1 && a.2 == b.2);
+        return dxgi.into_iter().map(|(name, _, vram)| Gpu { name, vram }).collect();
+    }
+    pci.into_iter()
+        .map(|(name, id)| {
+            // Each physical card takes one matching DXGI adapter, so two identical cards stay two.
+            let vram = dxgi.iter().position(|d| d.1 == id).map(|i| dxgi.remove(i).2).unwrap_or(0);
+            Gpu { name, vram }
+        })
+        .collect()
 }
 
 pub struct Display {
@@ -169,4 +230,15 @@ pub fn battery() -> Option<(bool, Option<u8>)> {
         return None; // no system battery
     }
     Some((status.ACLineStatus == 1, (status.BatteryLifePercent <= 100).then_some(status.BatteryLifePercent)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_pci_id;
+
+    #[test]
+    fn pci_instance_ids_are_parsed() {
+        assert_eq!(parse_pci_id(r"PCI\VEN_10DE&DEV_2B85&SUBSYS_89EC1043&REV_A1\E7BF60DF942DB04800"), Some((0x10DE, 0x2B85, 0x89EC1043)));
+        assert_eq!(parse_pci_id(r"ROOT\DISPLAY\0000"), None, "virtual displays are not PCI cards");
+    }
 }

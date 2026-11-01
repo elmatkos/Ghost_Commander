@@ -9,6 +9,7 @@ gc-core = { path = "../gc-core" }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
+    "Win32_Devices_DeviceAndDriverInstallation",
     "Win32_Foundation",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Gdi",
