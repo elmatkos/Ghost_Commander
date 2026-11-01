@@ -56,7 +56,7 @@ impl ThemeManager {
         if !self.open {
             return;
         }
-        if ctx.input(|i| i.key_pressed(Key::Escape) || i.key_pressed(Key::F9)) {
+        if ctx.input(|i| i.key_pressed(Key::Escape)) {
             self.open = false;
             return;
         }

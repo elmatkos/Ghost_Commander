@@ -4,6 +4,7 @@
 mod about;
 mod checksums_window;
 mod drive_bar;
+mod help_window;
 mod options;
 mod image_viewer;
 mod panel;
@@ -22,6 +23,7 @@ use std::time::Duration;
 use eframe::egui::{self, Key};
 use gc_core::jobs::{self, Job, Op, Resolution};
 use about::About;
+use help_window::HelpWindow;
 use gc_archive::{ArchiveIndex, PackFormat};
 use panel::{FileUse, Panel, PanelAction, SortKey};
 use options::Options;
@@ -60,6 +62,7 @@ struct App {
     /// "Apply to all" checkbox state of the conflict dialog.
     apply_all: bool,
     about: About,
+    help: HelpWindow,
     themes: ThemeManager,
     options: Options,
     sysinfo: SysInfoWindow,
@@ -85,6 +88,7 @@ impl App {
             status: None,
             apply_all: false,
             about: About::default(),
+            help: HelpWindow::default(),
             themes: ThemeManager::load(&cc.egui_ctx),
             options: Options::load(),
             sysinfo: SysInfoWindow::default(),
@@ -298,10 +302,10 @@ impl App {
         }
         // Consume the key: the window it opens also closes on the same key and must not see this press.
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::F1)) {
-            self.about.open = true;
+            self.help.open = true;
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::F9)) {
-            self.themes.open = true;
+            self.sysinfo.start(ctx);
         }
         let shift = ctx.input(|i| i.modifiers.shift);
         let alt = ctx.input(|i| i.modifiers.alt);
@@ -665,6 +669,7 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         let dialog_open = self.dialog.is_some()
             || self.about.open
+            || self.help.open
             || self.themes.open
             || self.options.open
             || self.sysinfo.open
@@ -698,7 +703,7 @@ impl eframe::App for App {
                         self.options.open = true;
                         ui.close_menu();
                     }
-                    if ui.button("Themes...  (F9)").clicked() {
+                    if ui.button("Themes...").clicked() {
                         self.themes.open = true;
                         ui.close_menu();
                     }
@@ -710,13 +715,17 @@ impl eframe::App for App {
                     }
                 });
                 ui.menu_button("Info", |ui| {
-                    if ui.button("System Info...").clicked() {
+                    if ui.button("System Info...  (F9)").clicked() {
                         self.sysinfo.start(ctx);
                         ui.close_menu();
                     }
                 });
                 ui.menu_button("Help", |ui| {
-                    if ui.button("About  (F1)").clicked() {
+                    if ui.button("Keyboard shortcuts  (F1)").clicked() {
+                        self.help.open = true;
+                        ui.close_menu();
+                    }
+                    if ui.button("About").clicked() {
                         self.about.open = true;
                         ui.close_menu();
                     }
@@ -771,6 +780,7 @@ impl eframe::App for App {
         self.show_dialog(ctx);
         self.show_conflict(ctx);
         self.about.show(ctx);
+        self.help.show(ctx, &self.themes.active);
         self.themes.show(ctx);
         self.options.show(ctx);
         self.sysinfo.show(ctx, &self.themes.active);
@@ -799,14 +809,14 @@ const HINTS: [(bool, bool, bool, &[Hint]); 4] = [
         false,
         false,
         &[
-            ("F1", "About"),
+            ("F1", "Help"),
             ("F3", "View"),
             ("F4", "Edit"),
             ("F5", "Copy"),
             ("F6", "Move"),
             ("F7", "MkDir"),
             ("F8/Del", "Recycle"),
-            ("F9", "Themes"),
+            ("F9", "System Info"),
             ("Tab", "Switch"),
             ("Space", "Mark"),
             ("Bksp", "Up"),

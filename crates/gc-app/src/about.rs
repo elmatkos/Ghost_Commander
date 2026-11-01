@@ -15,7 +15,7 @@ impl About {
         if !self.open {
             return;
         }
-        if ctx.input(|i| i.key_pressed(Key::Escape) || i.key_pressed(Key::F1) || i.key_pressed(Key::Enter)) {
+        if ctx.input(|i| i.key_pressed(Key::Escape) || i.key_pressed(Key::Enter)) {
             self.open = false;
             return;
         }

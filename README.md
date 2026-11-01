@@ -56,7 +56,7 @@ M0 and M1 are built: dual panes, keyboard navigation (arrows, PgUp/PgDn, Home/En
 
 Run: `cargo run --release` (binary `ghost-commander`). Test: `cargo test`.
 
-Branding lives in `assets/` (`icon.ico` is embedded into the exe by `crates/gc-app/build.rs`, `logo_512.png` is shown in the About window, F1).
+Branding lives in `assets/` (`icon.ico` is embedded into the exe by `crates/gc-app/build.rs`, `logo_512.png` is shown in the About window, Help > About).
 
 ## TODO (backlog)
 
@@ -79,7 +79,7 @@ Branding lives in `assets/` (`icon.ico` is embedded into the exe by `crates/gc-a
 
 ## Themes and file icons
 
-F9 opens the theme editor (live preview). Built-in themes: Dark, Light, Ghost, Norton Classic. Custom themes are TOML files in `%APPDATA%\Ghost Commander\themes\`; the editor saves them there, and the selected theme is remembered in `settings.toml`.
+Config > Themes opens the theme editor (live preview). Built-in themes: Dark, Light, Ghost, Norton Classic. Custom themes are TOML files in `%APPDATA%\Ghost Commander\themes\`; the editor saves them there, and the selected theme is remembered in `settings.toml`.
 
 A theme sets the semantic colors (background, text, cursor, folders, marked, errors), a color and an icon per file type (`folder`, `archive`, `image`, `audio`, `video`, `document`, `code`, `text`, `executable`, `config`, `other`), and optional `extensions` overrides (e.g. `mkv = "video"`). An icon is a built-in name (Phosphor icon font: `folder`, `archive`, `star`, ...) or any single character. Minimal custom theme:
 
@@ -115,7 +115,7 @@ The menu bar has Config (Options..., Themes...) and Help (About). Config > Optio
 
 ## System Info
 
-Info > System Info shows a scrollable summary in the style of EFI Commander's F9 view (crate `gc-sysinfo`): system and board (SMBIOS), BIOS and EC version, boot mode, Secure Boot, TPM, BIOS passwords, CPU with speed, cores, threads and the SIMD/crypto features it offers (SSE4.2, AVX2, AVX-512, SHA, AES, ...), memory with every installed module, GPUs and displays, battery, drives and the Windows build. Rows a machine does not expose are left out. The data is gathered on a worker thread; Copy puts it all on the clipboard as text. `cargo run -p gc-sysinfo --example dump` prints the same without the GUI.
+Info > System Info (F9) shows a scrollable summary in the style of EFI Commander's F9 view (crate `gc-sysinfo`): system and board (SMBIOS), BIOS and EC version, boot mode, Secure Boot, TPM, BIOS passwords, CPU with speed, cores, threads and the SIMD/crypto features it offers (SSE4.2, AVX2, AVX-512, SHA, AES, ...), memory with every installed module, GPUs and displays, battery, drives and the Windows build. Rows a machine does not expose are left out. The data is gathered on a worker thread; Copy puts it all on the clipboard as text. `cargo run -p gc-sysinfo --example dump` prints the same without the GUI.
 
 ## Sorting and quick filter
 
@@ -128,3 +128,5 @@ Enter on a `.crc`, `.sfv`, `.md5`, `.sha1` or `.sha256` file verifies it: every 
 Panels refresh themselves when files appear, disappear or are renamed in the shown folder (checked once a second); Ctrl+R refreshes at once. Shift+F4 asks for a name, creates an empty file there and opens it in the editor.
 
 The bottom line shows only the shortcuts for the modifier keys you hold: plain keys normally, the Shift ones while Shift is held, likewise Ctrl and Alt. Only as many as fit the window width are shown.
+
+F1 opens a Help window listing every function key and shortcut, grouped by modifier (function keys, Shift, Alt, Ctrl, moving around, mouse). About now lives only in the Help menu. F9 opens System Info; the theme editor is in Config > Themes.
