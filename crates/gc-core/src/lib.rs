@@ -3,6 +3,8 @@
 pub mod filetype;
 pub mod hash;
 pub mod jobs;
+#[cfg(windows)]
+mod winfs;
 
 use std::fs;
 use std::io;

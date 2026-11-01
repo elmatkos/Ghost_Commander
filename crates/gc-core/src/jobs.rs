@@ -1,13 +1,18 @@
 //! Background file operations (copy / move / delete) with progress, cancellation
 //! and interactive conflict resolution.
 
-use std::fs::{self, File, OpenOptions};
+#[cfg(not(windows))]
+use std::fs::File;
+use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
+
+#[cfg(windows)]
+use crate::winfs;
 
 const BUF_SIZE: usize = 1024 * 1024;
 
@@ -179,8 +184,23 @@ fn tree_size(path: &Path) -> u64 {
     }
 }
 
-fn copy_tree(src: &Path, dst: &Path, p: &Progress) -> io::Result<()> {
-    if fs::symlink_metadata(src)?.is_dir() {
+/// One file to copy, found by [`plan_copy`].
+struct FileJob {
+    src: PathBuf,
+    dst: PathBuf,
+    size: u64,
+}
+
+/// Files at least this big are copied past the system cache so they do not evict everything else.
+#[cfg(windows)]
+const UNBUFFERED_MIN: u64 = 256 * 1024 * 1024;
+/// At most this many files are copied at the same time.
+const MAX_WORKERS: usize = 4;
+
+/// Creates the folders of `src` below `dst` and lists the files that have to be copied.
+fn plan_copy(src: &Path, dst: &Path, p: &Progress, files: &mut Vec<FileJob>) -> io::Result<()> {
+    let meta = fs::symlink_metadata(src)?;
+    if meta.is_dir() {
         match fs::create_dir(dst) {
             Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists && dst.is_dir() => {}
@@ -191,20 +211,111 @@ fn copy_tree(src: &Path, dst: &Path, p: &Progress) -> io::Result<()> {
                 return Ok(());
             }
             let entry = entry?;
-            copy_tree(&entry.path(), &dst.join(entry.file_name()), p)?;
+            plan_copy(&entry.path(), &dst.join(entry.file_name()), p, files)?;
         }
-        Ok(())
     } else {
-        copy_file(src, dst, p)
+        files.push(FileJob { src: src.to_path_buf(), dst: dst.to_path_buf(), size: meta.len() });
+    }
+    Ok(())
+}
+
+/// How many files to copy at once: one on a spinning disk (parallel copies would make it seek
+/// back and forth), a few otherwise. `GC_COPY_THREADS` overrides it (for benchmarks).
+fn worker_count(src: &Path, dst: &Path) -> usize {
+    if let Some(n) = std::env::var("GC_COPY_THREADS").ok().and_then(|v| v.parse::<usize>().ok()) {
+        return n.max(1);
+    }
+    #[cfg(windows)]
+    if winfs::is_rotational(src) || winfs::is_rotational(dst) {
+        return 1;
+    }
+    #[cfg(not(windows))]
+    let _ = (src, dst);
+    thread::available_parallelism().map_or(2, |n| n.get()).clamp(1, MAX_WORKERS)
+}
+
+fn copy_tree(src: &Path, dst: &Path, p: &Progress) -> io::Result<()> {
+    let mut files = Vec::new();
+    plan_copy(src, dst, p, &mut files)?;
+    let workers = if files.len() > 1 { worker_count(src, dst) } else { 1 };
+    copy_files(&files, workers, p)
+}
+
+/// Copies the files on `workers` threads. A single failing file returns its own error; with
+/// several files every failure goes to the job's error list and the result only counts them.
+fn copy_files(files: &[FileJob], workers: usize, p: &Progress) -> io::Result<()> {
+    let next = AtomicUsize::new(0);
+    let errors: Mutex<Vec<(PathBuf, io::Error)>> = Mutex::new(Vec::new());
+    let work = || loop {
+        if p.cancelled() {
+            break;
+        }
+        let Some(f) = files.get(next.fetch_add(1, Ordering::Relaxed)) else { break };
+        if let Err(e) = copy_file(&f.src, &f.dst, f.size, p) {
+            errors.lock().unwrap().push((f.src.clone(), e));
+        }
+    };
+    if workers <= 1 {
+        work();
+    } else {
+        thread::scope(|s| {
+            for _ in 0..workers.min(files.len()) {
+                s.spawn(work);
+            }
+        });
+    }
+    let mut errors = errors.into_inner().unwrap();
+    match errors.len() {
+        0 => Ok(()),
+        1 if files.len() == 1 => Err(errors.remove(0).1),
+        n => {
+            for (path, e) in &errors {
+                p.fail(format!("{}: {e}", path.display()));
+            }
+            Err(io::Error::other(format!("{n} file(s) could not be copied")))
+        }
     }
 }
 
-fn copy_file(src: &Path, dst: &Path, p: &Progress) -> io::Result<()> {
+/// Copies one file; an existing target goes through the conflict dialog.
+#[cfg(windows)]
+fn copy_file(src: &Path, dst: &Path, size: u64, p: &Progress) -> io::Result<()> {
+    let mut target = dst.to_path_buf();
+    let mut overwrite = false;
+    loop {
+        match winfs::copy_file(src, &target, overwrite, size >= UNBUFFERED_MIN, p)? {
+            winfs::Outcome::Done | winfs::Outcome::Cancelled => return Ok(()),
+            winfs::Outcome::Exists => {
+                if target.is_dir() {
+                    return Err(io::Error::new(io::ErrorKind::AlreadyExists, "a folder has that name"));
+                }
+                match p.ask_conflict(&target) {
+                    Resolution::Skip => {
+                        p.done.fetch_add(size, Ordering::Relaxed);
+                        return Ok(());
+                    }
+                    Resolution::Cancel => return Ok(()),
+                    Resolution::Overwrite => overwrite = true,
+                    Resolution::Rename => {
+                        target = unique_name(&target);
+                        overwrite = false;
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn copy_file(src: &Path, dst: &Path, _size: u64, p: &Progress) -> io::Result<()> {
     let mut input = File::open(src)?;
     let size = input.metadata()?.len();
     if let Some(written) = copy_stream(&mut input, size, dst, p)? {
         if let Ok(meta) = fs::metadata(src) {
             let _ = fs::set_permissions(&written, meta.permissions());
+            if let Ok(modified) = meta.modified() {
+                let _ = OpenOptions::new().write(true).open(&written).and_then(|f| f.set_modified(modified));
+            }
         }
     }
     Ok(())
@@ -407,6 +518,32 @@ mod tests {
         fs::write(dest.join("src/a.txt"), b"keep").unwrap();
         let op = Op::Copy { srcs: vec![src], dest_dir: dest.clone() };
         (root, op, dest)
+    }
+
+    #[test]
+    fn copy_keeps_modified_time_and_handles_many_files() {
+        let root = scratch("many");
+        let src = root.join("src");
+        fs::create_dir_all(src.join("deep/er")).unwrap();
+        let old = std::time::SystemTime::now() - Duration::from_secs(3 * 24 * 3600);
+        for i in 0..60 {
+            let dir = if i % 3 == 0 { src.join("deep/er") } else { src.clone() };
+            fs::write(dir.join(format!("f{i}.txt")), format!("file {i}")).unwrap();
+        }
+        let first = fs::OpenOptions::new().write(true).open(src.join("f1.txt")).unwrap();
+        first.set_modified(old).unwrap();
+        drop(first);
+        let dest = root.join("dest");
+        fs::create_dir_all(&dest).unwrap();
+        let (p, prompts) = run_answering(Op::Copy { srcs: vec![src.clone()], dest_dir: dest.clone() }, Resolution::Skip, false);
+        assert_eq!((prompts, p.errors().len()), (0, 0));
+        let count = |d: &Path| fs::read_dir(d).unwrap().count();
+        assert_eq!(count(&dest.join("src")), 41); // 40 files plus the "deep" folder
+        assert_eq!(fs::read_to_string(dest.join("src/deep/er/f0.txt")).unwrap(), "file 0");
+        let copied = fs::metadata(dest.join("src/f1.txt")).unwrap().modified().unwrap();
+        let diff = copied.duration_since(old).unwrap_or_else(|e| e.duration());
+        assert!(diff < Duration::from_secs(3), "modified time was not kept: {diff:?}");
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
