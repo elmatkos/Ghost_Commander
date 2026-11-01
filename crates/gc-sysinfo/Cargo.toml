@@ -1,0 +1,19 @@
+[package]
+name = "gc-sysinfo"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+[dependencies]
+gc-core = { path = "../gc-core" }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Power",
+    "Win32_System_Registry",
+    "Win32_System_SystemInformation",
+    "Win32_System_TpmBaseServices",
+] }

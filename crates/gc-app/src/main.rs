@@ -7,6 +7,7 @@ mod options;
 mod image_viewer;
 mod panel;
 mod shell_menu;
+mod sysinfo_window;
 mod theme;
 mod theme_editor;
 mod viewer;
@@ -22,6 +23,7 @@ use about::About;
 use gc_archive::{ArchiveIndex, PackFormat};
 use panel::{FileUse, Panel, PanelAction};
 use options::Options;
+use sysinfo_window::SysInfoWindow;
 use theme_editor::ThemeManager;
 use image_viewer::ImageViewer;
 use viewer::Viewer;
@@ -54,6 +56,7 @@ struct App {
     about: About,
     themes: ThemeManager,
     options: Options,
+    sysinfo: SysInfoWindow,
     /// Drive list with free space, refreshed by a background thread (a dead network drive can block).
     drives: Arc<std::sync::Mutex<Vec<gc_core::DriveInfo>>>,
     viewer: Viewer,
@@ -76,6 +79,7 @@ impl App {
             about: About::default(),
             themes: ThemeManager::load(&cc.egui_ctx),
             options: Options::load(),
+            sysinfo: SysInfoWindow::default(),
             drives: watch_drives(&cc.egui_ctx),
             viewer: Viewer::default(),
             images: ImageViewer::default(),
@@ -565,6 +569,7 @@ impl eframe::App for App {
             || self.about.open
             || self.themes.open
             || self.options.open
+            || self.sysinfo.open
             || self.viewer.is_open()
             || self.jobs.iter().any(|j| j.job.progress.pending_conflict().is_some());
         if !dialog_open {
@@ -588,6 +593,12 @@ impl eframe::App for App {
                     }
                     if ui.button("Themes...  (F9)").clicked() {
                         self.themes.open = true;
+                        ui.close_menu();
+                    }
+                });
+                ui.menu_button("Info", |ui| {
+                    if ui.button("System Info...").clicked() {
+                        self.sysinfo.start(ctx);
                         ui.close_menu();
                     }
                 });
@@ -655,6 +666,7 @@ impl eframe::App for App {
         self.about.show(ctx);
         self.themes.show(ctx);
         self.options.show(ctx);
+        self.sysinfo.show(ctx, &self.themes.active);
         self.viewer.show(ctx);
         if let Some(err) = self.images.show(ctx) {
             self.status = Some(err);

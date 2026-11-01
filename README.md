@@ -112,3 +112,7 @@ Right click on files or folders on disk shows the real Windows Explorer menu (Op
 ## Menu, drive buttons and status line
 
 The menu bar has Config (Options..., Themes...) and Help (About). Config > Options switches the drive buttons on or off (and the free-space bar under each drive); settings live in `%APPDATA%\Ghost Commander\settings.toml`. With drive buttons on, every panel gets a row of pills (type icon, letter, used-space bar, details on hover) plus `\` (root of the drive) and `..` (parent folder). The drive list is refreshed by a background thread, so a disconnected network drive cannot freeze the window. Under each list a status line shows `marked / all in files, dirs` as in Total Commander (folder sizes are not calculated).
+
+## System Info
+
+Info > System Info shows a scrollable summary in the style of EFI Commander's F9 view (crate `gc-sysinfo`): system and board (SMBIOS), BIOS and EC version, boot mode, Secure Boot, TPM, BIOS passwords, CPU with speed, cores, threads and the SIMD/crypto features it offers (SSE4.2, AVX2, AVX-512, SHA, AES, ...), memory with every installed module, GPUs and displays, battery, drives and the Windows build. Rows a machine does not expose are left out. The data is gathered on a worker thread; Copy puts it all on the clipboard as text. `cargo run -p gc-sysinfo --example dump` prints the same without the GUI.

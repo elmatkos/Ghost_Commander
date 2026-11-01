@@ -1321,13 +1321,14 @@ dependencies = [
 
 [[package]]
 name = "gc-app"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "chrono",
  "eframe",
  "egui-phosphor",
  "gc-archive",
  "gc-core",
+ "gc-sysinfo",
  "image",
  "raw-window-handle",
  "serde",
@@ -1339,7 +1340,7 @@ dependencies = [
 
 [[package]]
 name = "gc-archive"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "chrono",
  "flate2",
@@ -1353,10 +1354,18 @@ dependencies = [
 
 [[package]]
 name = "gc-core"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "trash",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "gc-sysinfo"
+version = "0.12.0"
+dependencies = [
+ "gc-core",
+ "windows 0.58.0",
 ]
 
 [[package]]
