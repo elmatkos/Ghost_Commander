@@ -17,11 +17,35 @@ pub struct ChecksumsWindow {
     pub open: bool,
     job: Option<Arc<HashJob>>,
     compare: String,
+    /// Result of the last "Save .crc" click.
+    saved: Option<String>,
+}
+
+/// Writes `<file>.crc` for every file that was hashed; returns a one-line report.
+fn save_crc_files(job: &HashJob) -> String {
+    let (mut ok, mut last, mut errors) = (0, String::new(), Vec::new());
+    for f in &job.files {
+        if let Some(Ok(d)) = f.result.lock().unwrap().as_ref() {
+            match hash::write_crc_file(&f.path, d) {
+                Ok(p) => {
+                    ok += 1;
+                    last = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                }
+                Err(e) => errors.push(format!("{}: {e}", f.path.display())),
+            }
+        }
+    }
+    let mut msg = if ok == 1 { format!("Saved {last}") } else { format!("Saved {ok} .crc files") };
+    if !errors.is_empty() {
+        msg.push_str(&format!(" - errors: {}", errors.join("; ")));
+    }
+    msg
 }
 
 impl ChecksumsWindow {
     pub fn start(&mut self, ctx: &egui::Context, paths: Vec<PathBuf>) {
         self.stop();
+        self.saved = None;
         let ctx = ctx.clone();
         self.job = Some(hash::spawn(paths, move || ctx.request_repaint()));
         self.open = true;
@@ -60,9 +84,16 @@ impl ChecksumsWindow {
                     ctx.copy_text(Self::to_text(&job));
                 }
                 restart = ui.button(format!("{} Recalculate", icon::ARROWS_CLOCKWISE)).clicked();
+                let done = job.is_finished();
+                if ui.add_enabled(done, egui::Button::new(format!("{} Save .crc", icon::FLOPPY_DISK))).on_hover_text("Write <file>.crc (name + CRC-32) next to each file").clicked() {
+                    self.saved = Some(save_crc_files(&job));
+                }
                 ui.label("Compare with:");
                 ui.add(egui::TextEdit::singleline(&mut self.compare).hint_text("paste a checksum").desired_width(380.0));
             });
+            if let Some(msg) = &self.saved {
+                ui.label(msg);
+            }
             if job.is_finished() {
                 ui.label(format!("{} file(s), {}", job.files.len(), fmt_size(job.total)));
             } else {

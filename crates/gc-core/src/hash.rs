@@ -63,6 +63,17 @@ pub fn hash_reader<R: Read>(mut r: R, done: &AtomicU64, cancel: &AtomicBool) -> 
     }))
 }
 
+/// Writes `<file>.crc` next to `file` (e.g. `name.ext` -> `name.ext.crc`) in SFV format:
+/// `name.ext 1A2B3C4D`. Returns the path written.
+pub fn write_crc_file(file: &std::path::Path, d: &Digests) -> io::Result<PathBuf> {
+    let name = file.file_name().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no file name"))?;
+    let mut target = file.as_os_str().to_owned();
+    target.push(".crc");
+    let target = PathBuf::from(target);
+    std::fs::write(&target, format!("{} {}\r\n", name.to_string_lossy(), d.crc32.to_uppercase()))?;
+    Ok(target)
+}
+
 /// One file of a [`HashJob`].
 pub struct FileHash {
     pub path: PathBuf,
@@ -158,6 +169,17 @@ mod tests {
     fn cancelled_gives_none() {
         let r = hash_reader(&b"data"[..], &AtomicU64::new(0), &AtomicBool::new(true)).unwrap();
         assert!(r.is_none());
+    }
+
+    #[test]
+    fn crc_file_is_named_after_source() {
+        let dir = std::env::temp_dir().join(format!("gc-crc-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("fine.name.ext");
+        let out = write_crc_file(&src, &digest(b"abc")).unwrap();
+        assert_eq!(out, dir.join("fine.name.ext.crc"));
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "fine.name.ext 352441C2\r\n");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
