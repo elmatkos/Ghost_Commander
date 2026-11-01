@@ -344,6 +344,16 @@ pub fn make_dir(parent: &Path, name: &str) -> io::Result<PathBuf> {
     Ok(path)
 }
 
+/// Creates an empty file `name` in `parent`; fails if it already exists.
+pub fn make_file(parent: &Path, name: &str) -> io::Result<PathBuf> {
+    if name.is_empty() || name.contains(['/', '\\']) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid file name"));
+    }
+    let path = parent.join(name);
+    fs::OpenOptions::new().write(true).create_new(true).open(&path)?;
+    Ok(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -397,6 +407,16 @@ mod tests {
         fs::write(dest.join("src/a.txt"), b"keep").unwrap();
         let op = Op::Copy { srcs: vec![src], dest_dir: dest.clone() };
         (root, op, dest)
+    }
+
+    #[test]
+    fn make_file_creates_once() {
+        let dir = scratch("mkfile");
+        let p = make_file(&dir, "a.txt").unwrap();
+        assert!(p.is_file());
+        assert!(make_file(&dir, "a.txt").is_err());
+        assert!(make_file(&dir, "x/y").is_err());
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

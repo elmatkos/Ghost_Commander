@@ -35,6 +35,8 @@ use viewer::Viewer;
 enum Dialog {
     Confirm(Op),
     MkDir(String),
+    /// Shift+F4: name of a new empty file to create and edit.
+    NewFile(String),
     /// Drive picker for panel `panel`.
     Drives { panel: usize, list: Vec<PathBuf>, sel: usize },
     /// Extract inner paths of an archive into a folder.
@@ -256,6 +258,9 @@ impl App {
             if pressed(ctx, Key::F) {
                 self.panels[self.active].open_filter();
             }
+            if pressed(ctx, Key::R) {
+                self.reload_all();
+            }
             if pressed(ctx, Key::H) {
                 self.open_checksums(ctx);
             }
@@ -320,7 +325,15 @@ impl App {
             self.view_or_edit(ctx, false);
         }
         if pressed(ctx, Key::F4) && !ctrl {
-            self.view_or_edit(ctx, true);
+            if shift {
+                if self.panels[self.active].disk_folder().is_some() {
+                    self.dialog = Some(Dialog::NewFile("New file.txt".into()));
+                } else {
+                    self.status = Some("Archives are read-only.".into());
+                }
+            } else {
+                self.view_or_edit(ctx, true);
+            }
         }
         for (key, panel) in [(Key::Num1, 0), (Key::Num2, 1)] {
             if ctrl && pressed(ctx, key) {
@@ -372,6 +385,7 @@ impl App {
         let mut keep: Option<Dialog> = None;
         let mut run: Option<Op> = None;
         let mut mkdir: Option<String> = None;
+        let mut newfile: Option<String> = None;
         let mut spawned: Option<Job> = None;
 
         match dialog {
@@ -472,6 +486,22 @@ impl App {
                     keep = Some(Dialog::MkDir(name));
                 }
             }
+            Dialog::NewFile(mut name) => {
+                let mut ok = enter;
+                let mut cancel = escape;
+                egui::Window::new("New file").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+                    ui.add(egui::TextEdit::singleline(&mut name)).request_focus();
+                    ui.horizontal(|ui| {
+                        ok |= ui.button("Create and edit (Enter)").clicked();
+                        cancel |= ui.button("Cancel (Esc)").clicked();
+                    });
+                });
+                if ok {
+                    newfile = Some(name);
+                } else if !cancel {
+                    keep = Some(Dialog::NewFile(name));
+                }
+            }
             Dialog::Drives { panel, list, mut sel } => {
                 let (down, up) = ctx.input(|i| (i.key_pressed(Key::ArrowDown), i.key_pressed(Key::ArrowUp)));
                 if down {
@@ -507,6 +537,21 @@ impl App {
         }
         if let Some(job) = spawned {
             self.jobs.push(RunningJob { job, refreshed: false });
+        }
+        if let Some(name) = newfile {
+            let made = match self.panels[self.active].disk_folder() {
+                Some(dir) => jobs::make_file(dir, &name),
+                None => Err(std::io::Error::other("archives are read-only")),
+            };
+            match made {
+                Ok(path) => {
+                    self.status = None;
+                    self.reload_all();
+                    self.panels[self.active].select_path(&path);
+                    self.use_file(ctx, path, FileUse::Edit, Vec::new());
+                }
+                Err(e) => self.status = Some(format!("Create file failed: {e}")),
+            }
         }
         if let Some(name) = mkdir {
             let made = match self.panels[self.active].disk_folder() {
@@ -640,6 +685,11 @@ impl eframe::App for App {
             }
         }
         self.poll_jobs();
+        // Notice files created or removed outside the app (or by a tool such as Save .crc).
+        for p in &mut self.panels {
+            p.refresh_if_changed();
+        }
+        ctx.request_repaint_after(Duration::from_secs(1));
 
         egui::TopBottomPanel::top("menu").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
@@ -680,11 +730,11 @@ impl eframe::App for App {
             }
             self.show_jobs(ui);
             ui.horizontal(|ui| {
-                for (key, label) in [("F3", "View"), ("F4", "Edit"), ("F5", "Copy"), ("F6", "Move"), ("Alt+F5", "Pack"), ("F7", "MkDir"), ("F8/Del", "Recycle"), ("Shift+F8/Del", "Delete")] {
+                for (key, label) in [("F3", "View"), ("F4", "Edit"), ("Shift+F4", "NewFile"), ("F5", "Copy"), ("F6", "Move"), ("Alt+F5", "Pack"), ("F7", "MkDir"), ("F8/Del", "Recycle"), ("Shift+F8/Del", "Delete")] {
                     ui.monospace(format!("{key} {label}"));
                     ui.add_space(12.0);
                 }
-                ui.monospace("Tab switch | Space mark | Bksp up | Ctrl+1/2 drive");
+                ui.monospace("Tab switch | Space mark | Bksp up | Ctrl+R refresh | Ctrl+1/2 drive");
             });
         });
 

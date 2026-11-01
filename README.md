@@ -124,3 +124,5 @@ Click a column heading (Name, Size, Date) to sort, click again to reverse; Ctrl+
 Ctrl+H (or Tools > Checksums) calculates CRC-32, MD5, SHA-1 and SHA-256 of the marked files, or of the file under the cursor, in one read pass; several files are hashed in parallel. Paste a checksum into "Compare with" and the matching value lights up. Folders are skipped and files inside archives are not supported yet. "Save .crc" writes `name.ext.crc` next to each file, one SFV-style line `name.ext 1A2B3C4D`.
 
 Enter on a `.crc`, `.sfv`, `.md5`, `.sha1` or `.sha256` file verifies it: every file it lists (looked up next to the checksum file) is hashed in parallel and shown as OK, FAILED (with expected and actual value) or MISSING. SFV, `md5sum`/`sha256sum` and bare-hash files are understood; the algorithm follows the hash length.
+
+Panels refresh themselves when files appear, disappear or are renamed in the shown folder (checked once a second); Ctrl+R refreshes at once. Shift+F4 asks for a name, creates an empty file there and opens it in the editor.

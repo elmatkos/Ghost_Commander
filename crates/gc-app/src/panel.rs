@@ -69,6 +69,8 @@ pub struct Panel {
     scroll_to_cursor: bool,
     last_offset: f32,
     last_height: f32,
+    /// Modified time of the folder when it was last read (to notice files created elsewhere).
+    stamp: Option<std::time::SystemTime>,
 }
 
 impl Panel {
@@ -93,14 +95,27 @@ impl Panel {
             scroll_to_cursor: false,
             last_offset: 0.0,
             last_height: 0.0,
+            stamp: None,
         };
         p.reload();
         p
     }
 
+    fn folder_stamp(&self) -> Option<std::time::SystemTime> {
+        std::fs::metadata(&self.cwd).and_then(|m| m.modified()).ok()
+    }
+
+    /// Re-reads the folder if something was added, removed or renamed in it behind our back.
+    pub fn refresh_if_changed(&mut self) {
+        if self.archive.is_none() && self.loading.is_none() && self.folder_stamp() != self.stamp {
+            self.reload();
+        }
+    }
+
     /// Re-reads the directory and keeps the cursor on the same name when possible.
     pub fn reload(&mut self) {
         let keep = self.entries.get(self.cursor).map(|e| e.name.clone());
+        self.stamp = if self.archive.is_none() { self.folder_stamp() } else { None };
         let listing = match &self.archive {
             Some(a) => Ok(a.index.list(&a.inner)),
             None => list_dir(&self.cwd),
@@ -705,6 +720,18 @@ mod tests {
 
     fn new_panel(root: &std::path::Path) -> Panel {
         Panel::new(root.to_path_buf(), eframe::egui::Context::default())
+    }
+
+    #[test]
+    fn refresh_notices_new_files() {
+        let dir = std::env::temp_dir().join(format!("gc_refresh_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut p = new_panel(&dir);
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        std::fs::write(dir.join("new.crc"), b"x").unwrap();
+        p.refresh_if_changed();
+        assert!(p.entries.iter().any(|e| e.name == "new.crc"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Waits for the archive worker thread, like the UI does over several frames.
