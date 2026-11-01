@@ -447,7 +447,7 @@ impl Panel {
     }
 
     /// Column headings; a click sorts by that column (again: reverse).
-    fn show_header(&mut self, ui: &mut egui::Ui, theme: &Theme) {
+    fn show_header(&mut self, ui: &mut egui::Ui, panel_id: &str, theme: &Theme) {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), HEADER_H), Sense::hover());
         let right = rect.right() - 6.0;
         let size_right = right - DATE_COL_W;
@@ -460,7 +460,7 @@ impl Panel {
         painter.rect_filled(rect, 2.0, ui.visuals().faint_bg_color);
         for (key, label, align, x, from, to) in zones {
             let zone = egui::Rect::from_min_max(egui::pos2(from, rect.top()), egui::pos2(to, rect.bottom()));
-            let resp = ui.interact(zone, ui.id().with(("sort", key as u8)), Sense::click()).on_hover_text("Click to sort (click again to reverse). Ctrl+F3 name, F4 extension, F5 date, F6 size");
+            let resp = ui.interact(zone, ui.id().with((panel_id, "sort", key as u8)), Sense::click()).on_hover_text("Click to sort (click again to reverse). Ctrl+F3 name, F4 extension, F5 date, F6 size");
             if resp.hovered() {
                 painter.rect_filled(zone, 2.0, ui.visuals().widgets.hovered.weak_bg_fill);
             }
@@ -533,7 +533,7 @@ impl Panel {
         }
 
         ui.spacing_mut().item_spacing.y = 0.0;
-        self.show_header(ui, theme);
+        self.show_header(ui, id, theme);
         let mut area = egui::ScrollArea::vertical().id_salt(id).auto_shrink(false).max_height((ui.available_height() - STATUS_H - if self.filter_open { FILTER_H } else { 0.0 }).max(ROW_H));
         if self.scroll_to_cursor {
             let top = self.cursor as f32 * ROW_H;
