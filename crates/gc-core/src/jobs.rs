@@ -252,6 +252,20 @@ pub fn copy_stream(input: &mut dyn Read, size: u64, dst: &Path, p: &Progress) ->
     Ok(Some(target))
 }
 
+/// For writers that cannot go through [`copy_stream`] (the library writes the file itself):
+/// resolves a name conflict at `dst` with the usual dialog. Returns the path to write, or `None`
+/// to skip the file (or when the job was cancelled). An existing file to overwrite is removed.
+pub fn claim_target(dst: &Path, p: &Progress) -> Option<PathBuf> {
+    if fs::symlink_metadata(dst).is_err() || dst.is_dir() {
+        return Some(dst.to_path_buf());
+    }
+    match p.ask_conflict(dst) {
+        Resolution::Skip | Resolution::Cancel => None,
+        Resolution::Overwrite => fs::remove_file(dst).ok().map(|_| dst.to_path_buf()),
+        Resolution::Rename => Some(unique_name(dst)),
+    }
+}
+
 /// `name.ext` -> first free `name (2).ext`, `name (3).ext`, ...
 fn unique_name(path: &Path) -> PathBuf {
     let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();

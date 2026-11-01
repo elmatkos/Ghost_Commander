@@ -21,7 +21,7 @@ use eframe::egui::{self, Key};
 use gc_core::jobs::{self, Job, Op, Resolution};
 use about::About;
 use gc_archive::{ArchiveIndex, PackFormat};
-use panel::{FileUse, Panel, PanelAction};
+use panel::{FileUse, Panel, PanelAction, SortKey};
 use options::Options;
 use sysinfo_window::SysInfoWindow;
 use theme_editor::ThemeManager;
@@ -210,6 +210,34 @@ impl App {
 
     fn handle_keys(&mut self, ctx: &egui::Context) {
         let pressed = |ctx: &egui::Context, k: Key| ctx.input(|i| i.key_pressed(k));
+        let ctrl = ctx.input(|i| i.modifiers.ctrl);
+        // While the quick filter box is open, typing belongs to it: only these keys are ours.
+        if self.panels[self.active].filter_open() {
+            let panel = &mut self.panels[self.active];
+            if pressed(ctx, Key::Escape) {
+                panel.close_filter();
+            } else if pressed(ctx, Key::Enter) {
+                panel.finish_filter();
+            }
+            if pressed(ctx, Key::ArrowDown) {
+                panel.move_cursor(1);
+            }
+            if pressed(ctx, Key::ArrowUp) {
+                panel.move_cursor(-1);
+            }
+            return;
+        }
+        if ctrl {
+            let sort = [(Key::F3, SortKey::Name), (Key::F4, SortKey::Ext), (Key::F5, SortKey::Date), (Key::F6, SortKey::Size)];
+            for (key, by) in sort {
+                if pressed(ctx, key) {
+                    self.panels[self.active].set_sort(by);
+                }
+            }
+            if pressed(ctx, Key::F) {
+                self.panels[self.active].open_filter();
+            }
+        }
         let panel = &mut self.panels[self.active];
         if pressed(ctx, Key::ArrowDown) {
             panel.move_cursor(1);
@@ -251,7 +279,7 @@ impl App {
         let shift = ctx.input(|i| i.modifiers.shift);
         let alt = ctx.input(|i| i.modifiers.alt);
         for key in [Key::F5, Key::F6, Key::F7, Key::F8] {
-            if pressed(ctx, key) {
+            if pressed(ctx, key) && !ctrl {
                 if alt && key == Key::F5 {
                     self.open_pack_dialog();
                 } else {
@@ -266,13 +294,12 @@ impl App {
         if pressed(ctx, Key::Delete) || cut {
             self.open_dialog_for(Key::F8, shift || cut);
         }
-        if pressed(ctx, Key::F3) {
+        if pressed(ctx, Key::F3) && !ctrl {
             self.view_or_edit(ctx, false);
         }
-        if pressed(ctx, Key::F4) {
+        if pressed(ctx, Key::F4) && !ctrl {
             self.view_or_edit(ctx, true);
         }
-        let ctrl = ctx.input(|i| i.modifiers.ctrl);
         for (key, panel) in [(Key::Num1, 0), (Key::Num2, 1)] {
             if ctrl && pressed(ctx, key) {
                 let list = gc_core::drives();
@@ -576,11 +603,13 @@ impl eframe::App for App {
             self.handle_keys(ctx);
             // Tab switches panels here. egui also uses it to move the keyboard focus to a button,
             // where Enter or Space would then press it: keep nothing focused.
-            ctx.memory_mut(|m| {
-                if let Some(id) = m.focused() {
-                    m.surrender_focus(id);
-                }
-            });
+            if !self.panels.iter().any(|p| p.filter_open()) {
+                ctx.memory_mut(|m| {
+                    if let Some(id) = m.focused() {
+                        m.surrender_focus(id);
+                    }
+                });
+            }
         }
         self.poll_jobs();
 

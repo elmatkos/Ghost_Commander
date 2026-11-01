@@ -55,7 +55,14 @@ pub struct Panel {
     loading: Option<Loading>,
     ctx: egui::Context,
     pub action: Option<PanelAction>,
+    /// The folder as read and sorted; `entries` is what is shown (filtered, with `..`).
+    listing: Vec<Entry>,
     entries: Vec<Entry>,
+    sort: SortKey,
+    sort_desc: bool,
+    filter: String,
+    filter_open: bool,
+    filter_focus: bool,
     cursor: usize,
     marked: HashSet<PathBuf>,
     error: Option<String>,
@@ -73,7 +80,13 @@ impl Panel {
             loading: None,
             ctx,
             action: None,
+            listing: Vec::new(),
             entries: Vec::new(),
+            sort: SortKey::Name,
+            sort_desc: false,
+            filter: String::new(),
+            filter_open: false,
+            filter_focus: false,
             cursor: 0,
             marked: HashSet::new(),
             error: None,
@@ -93,27 +106,78 @@ impl Panel {
             None => list_dir(&self.cwd),
         };
         match listing {
-            Ok(mut entries) => {
-                // Inside an archive there is always a way up (to the folder holding it).
-                if let Some(parent) = self.cwd.parent() {
-                    entries.insert(
-                        0,
-                        Entry { name: PARENT.into(), path: parent.to_path_buf(), is_dir: true, size: 0, modified: None },
-                    );
-                }
-                self.entries = entries;
+            Ok(entries) => {
+                self.listing = entries;
                 self.error = None;
             }
             Err(e) => {
-                self.entries.clear();
+                self.listing.clear();
                 self.error = Some(e.to_string());
             }
         }
+        sort_entries(&mut self.listing, self.sort, self.sort_desc);
+        self.apply_view(keep);
+        self.marked.retain(|m| self.listing.iter().any(|e| &e.path == m));
+        self.scroll_to_cursor = true;
+    }
+
+    /// Builds the shown list from the raw listing: quick filter applied, `..` on top.
+    fn apply_view(&mut self, keep: Option<String>) {
+        let needle = self.filter.to_lowercase();
+        let mut entries: Vec<Entry> = if self.error.is_some() {
+            Vec::new()
+        } else {
+            self.listing.iter().filter(|e| needle.is_empty() || e.name.to_lowercase().contains(&needle)).cloned().collect()
+        };
+        // Inside an archive there is always a way up (to the folder holding it).
+        if let (Some(parent), None) = (self.cwd.parent(), &self.error) {
+            entries.insert(0, Entry { name: PARENT.into(), path: parent.to_path_buf(), is_dir: true, size: 0, modified: None });
+        }
+        self.entries = entries;
         self.cursor = keep
             .and_then(|n| self.entries.iter().position(|e| e.name == n))
             .unwrap_or_else(|| self.cursor.min(self.entries.len().saturating_sub(1)));
-        self.marked.retain(|m| self.entries.iter().any(|e| &e.path == m));
         self.scroll_to_cursor = true;
+    }
+
+    /// Sorts by `key`; choosing the same key again reverses the order.
+    pub fn set_sort(&mut self, key: SortKey) {
+        if self.sort == key {
+            self.sort_desc = !self.sort_desc;
+        } else {
+            self.sort = key;
+            // Biggest and newest first is what one usually wants from these two.
+            self.sort_desc = matches!(key, SortKey::Size | SortKey::Date);
+        }
+        let keep = self.entries.get(self.cursor).map(|e| e.name.clone());
+        sort_entries(&mut self.listing, self.sort, self.sort_desc);
+        self.apply_view(keep);
+    }
+
+    pub fn filter_open(&self) -> bool {
+        self.filter_open
+    }
+
+    /// Shows the quick filter box (Ctrl+F) and puts the keyboard into it.
+    pub fn open_filter(&mut self) {
+        self.filter_open = true;
+        self.filter_focus = true;
+    }
+
+    /// Esc: drops the filter text and shows everything again.
+    pub fn close_filter(&mut self) {
+        self.filter_open = false;
+        if !self.filter.is_empty() {
+            self.filter.clear();
+            let keep = self.entries.get(self.cursor).map(|e| e.name.clone());
+            self.apply_view(keep);
+        }
+    }
+
+    /// Enter in the filter box: stop typing but keep the filtered list.
+    pub fn finish_filter(&mut self) {
+        self.filter_open = false;
+        self.filter_focus = false;
     }
 
     pub fn move_cursor(&mut self, delta: isize) {
@@ -217,6 +281,8 @@ impl Panel {
         self.entries.clear();
         self.cursor = 0;
         self.marked.clear();
+        self.filter.clear();
+        self.filter_open = false;
         self.reload();
     }
 
@@ -380,6 +446,57 @@ impl Panel {
         (marked, total)
     }
 
+    /// Column headings; a click sorts by that column (again: reverse).
+    fn show_header(&mut self, ui: &mut egui::Ui, theme: &Theme) {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), HEADER_H), Sense::hover());
+        let right = rect.right() - 6.0;
+        let size_right = right - DATE_COL_W;
+        let zones = [
+            (SortKey::Name, "Name", Align2::LEFT_CENTER, rect.left() + 6.0 + ICON_COL_W, rect.left(), size_right - 90.0),
+            (SortKey::Size, "Size", Align2::RIGHT_CENTER, size_right, size_right - 90.0, size_right + 4.0),
+            (SortKey::Date, "Date", Align2::RIGHT_CENTER, right, size_right + 4.0, rect.right()),
+        ];
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 2.0, ui.visuals().faint_bg_color);
+        for (key, label, align, x, from, to) in zones {
+            let zone = egui::Rect::from_min_max(egui::pos2(from, rect.top()), egui::pos2(to, rect.bottom()));
+            let resp = ui.interact(zone, ui.id().with(("sort", key as u8)), Sense::click()).on_hover_text("Click to sort (click again to reverse). Ctrl+F3 name, F4 extension, F5 date, F6 size");
+            if resp.hovered() {
+                painter.rect_filled(zone, 2.0, ui.visuals().widgets.hovered.weak_bg_fill);
+            }
+            let active = self.sort == key;
+            let caret = if self.sort_desc { egui_phosphor::regular::CARET_DOWN } else { egui_phosphor::regular::CARET_UP };
+            let text = match (active, align == Align2::LEFT_CENTER) {
+                (false, _) => label.to_owned(),
+                (true, true) => format!("{label} {caret}"),
+                (true, false) => format!("{caret} {label}"),
+            };
+            let color = if active { theme.accent.0 } else { ui.visuals().weak_text_color() };
+            painter.text(egui::pos2(x, rect.center().y), align, text, FontId::proportional(12.0), color);
+            if resp.clicked() {
+                self.set_sort(key);
+            }
+        }
+    }
+
+    /// The quick filter box under the list (Ctrl+F); typing narrows the list by name.
+    fn show_filter_bar(&mut self, ui: &mut egui::Ui) {
+        if !self.filter_open {
+            return;
+        }
+        ui.horizontal(|ui| {
+            ui.label(egui_phosphor::regular::FUNNEL);
+            let edit = ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("filter by name (Enter keeps it, Esc clears)").desired_width(f32::INFINITY));
+            if std::mem::take(&mut self.filter_focus) {
+                edit.request_focus();
+            }
+            if edit.changed() {
+                let keep = self.entries.get(self.cursor).map(|e| e.name.clone());
+                self.apply_view(keep);
+            }
+        });
+    }
+
     /// Total Commander style summary under the list: `marked / all in files, dirs`.
     fn show_status(&self, ui: &mut egui::Ui, theme: &Theme) {
         let ((mf, md, ms), (tf, td, ts)) = self.stats();
@@ -387,7 +504,8 @@ impl Panel {
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 3.0, ui.visuals().faint_bg_color);
         let any = mf + md > 0;
-        let text = format!("{} / {} in {mf} / {tf} file(s), {md} / {td} dir(s)", fmt_size(ms), fmt_size(ts));
+        let filter = if self.filter.is_empty() { String::new() } else { format!("filter \"{}\"  ", self.filter) };
+        let text = format!("{filter}{} / {} in {mf} / {tf} file(s), {md} / {td} dir(s)", fmt_size(ms), fmt_size(ts));
         let color = if any { theme.marked.0 } else { theme.text.0.gamma_multiply(0.75) };
         painter.text(rect.left_center() + egui::vec2(6.0, 0.0), Align2::LEFT_CENTER, text, FontId::monospace(12.0), color);
     }
@@ -415,7 +533,8 @@ impl Panel {
         }
 
         ui.spacing_mut().item_spacing.y = 0.0;
-        let mut area = egui::ScrollArea::vertical().id_salt(id).auto_shrink(false).max_height((ui.available_height() - STATUS_H).max(ROW_H));
+        self.show_header(ui, theme);
+        let mut area = egui::ScrollArea::vertical().id_salt(id).auto_shrink(false).max_height((ui.available_height() - STATUS_H - if self.filter_open { FILTER_H } else { 0.0 }).max(ROW_H));
         if self.scroll_to_cursor {
             let top = self.cursor as f32 * ROW_H;
             let mut off = self.last_offset;
@@ -504,6 +623,7 @@ impl Panel {
         });
         self.last_offset = out.state.offset.y;
         self.last_height = out.inner_rect.height();
+        self.show_filter_bar(ui);
         self.show_status(ui, theme);
         clicked
     }
@@ -517,12 +637,48 @@ fn join_inner(inner: &str, name: &str) -> String {
     }
 }
 
+/// What the list is ordered by.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SortKey {
+    Name,
+    Ext,
+    Size,
+    Date,
+}
+
+fn name_order(a: &Entry, b: &Entry) -> std::cmp::Ordering {
+    a.name.to_lowercase().cmp(&b.name.to_lowercase())
+}
+
+/// Folders always stay on top. Folders have no size or extension, so they go by name then.
+fn sort_entries(list: &mut [Entry], key: SortKey, desc: bool) {
+    list.sort_by(|a, b| {
+        b.is_dir.cmp(&a.is_dir).then_with(|| {
+            let ord = match key {
+                SortKey::Name => name_order(a, b),
+                SortKey::Ext => {
+                    let ext = |e: &Entry| if e.is_dir { String::new() } else { gc_core::filetype::extension_of(&e.path).unwrap_or_default() };
+                    ext(a).cmp(&ext(b)).then_with(|| name_order(a, b))
+                }
+                SortKey::Size if a.is_dir => name_order(a, b),
+                SortKey::Size => a.size.cmp(&b.size).then_with(|| name_order(a, b)),
+                SortKey::Date => a.modified.cmp(&b.modified).then_with(|| name_order(a, b)),
+            };
+            if desc { ord.reverse() } else { ord }
+        })
+    });
+}
+
 /// Name of the synthetic first row that leads to the parent folder.
 /// No real entry can have this name, so it is safe to compare against.
 const PARENT: &str = "..";
 const ROW_H: f32 = 20.0;
 /// Height of the status line under the list.
 const STATUS_H: f32 = 22.0;
+/// Height of the column headings above the list.
+const HEADER_H: f32 = 20.0;
+/// Height reserved for the quick filter box.
+const FILTER_H: f32 = 28.0;
 /// Space before the name for the file-type icon.
 const ICON_COL_W: f32 = 22.0;
 /// Width reserved for the "YYYY-MM-DD HH:MM" column plus a gap.
@@ -659,6 +815,60 @@ mod tests {
         p.enter(); // cursor starts on '..'
         assert_eq!(p.cwd, root);
         assert_eq!(p.entries[p.cursor].name, "child", "cursor returns to the folder we left");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("gc_panel_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("zdir")).unwrap();
+        std::fs::write(root.join("b.txt"), vec![0u8; 10]).unwrap();
+        std::fs::write(root.join("a.rs"), vec![0u8; 300]).unwrap();
+        std::fs::write(root.join("C.md"), vec![0u8; 20]).unwrap();
+        root
+    }
+
+    fn shown(p: &Panel) -> Vec<&str> {
+        p.entries.iter().map(|e| e.name.as_str()).collect()
+    }
+
+    #[test]
+    fn sorting_keeps_folders_on_top_and_reverses_on_second_click() {
+        use super::SortKey;
+        let root = scratch_dir("sort");
+        let mut p = new_panel(&root);
+        assert_eq!(shown(&p), ["..", "zdir", "a.rs", "b.txt", "C.md"]);
+
+        p.set_sort(SortKey::Size); // biggest first
+        assert_eq!(shown(&p), ["..", "zdir", "a.rs", "C.md", "b.txt"]);
+        p.set_sort(SortKey::Size);
+        assert_eq!(shown(&p), ["..", "zdir", "b.txt", "C.md", "a.rs"]);
+        p.set_sort(SortKey::Ext);
+        assert_eq!(shown(&p), ["..", "zdir", "C.md", "a.rs", "b.txt"]);
+        p.set_sort(SortKey::Name);
+        assert_eq!(shown(&p), ["..", "zdir", "a.rs", "b.txt", "C.md"]);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn quick_filter_narrows_the_list_and_survives_a_reload_but_not_navigation() {
+        let root = scratch_dir("filter");
+        let mut p = new_panel(&root);
+        p.open_filter();
+        p.filter = "B.T".into();
+        p.apply_view(None);
+        assert_eq!(shown(&p), ["..", "b.txt"], "case-insensitive substring, '..' stays");
+
+        p.reload();
+        assert_eq!(shown(&p), ["..", "b.txt"]);
+        p.close_filter();
+        assert_eq!(shown(&p).len(), 5);
+
+        p.filter = "zd".into();
+        p.apply_view(None);
+        p.move_cursor(1);
+        p.enter(); // into zdir
+        assert!(p.filter.is_empty(), "a new folder starts unfiltered");
         std::fs::remove_dir_all(&root).unwrap();
     }
 

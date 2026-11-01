@@ -17,6 +17,7 @@ enum Kind {
     Zip,
     SevenZip,
     Tar(Compression),
+    Rar,
 }
 
 /// Outer compression of a tarball.
@@ -32,6 +33,8 @@ fn kind_of(path: &Path) -> Option<Kind> {
     let ends = |suffixes: &[&str]| suffixes.iter().any(|s| name.ends_with(s));
     if ends(&[".zip"]) {
         Some(Kind::Zip)
+    } else if ends(&[".rar"]) {
+        Some(Kind::Rar)
     } else if ends(&[".7z"]) {
         Some(Kind::SevenZip)
     } else if ends(&[".tar.gz", ".tgz"]) {
@@ -89,6 +92,7 @@ pub fn open(file: &Path) -> io::Result<ArchiveIndex> {
         Kind::Zip => read_zip_index(file)?,
         Kind::SevenZip => read_7z_index(file)?,
         Kind::Tar(c) => read_tar_index(file, c)?,
+        Kind::Rar => read_rar_index(file)?,
     };
     Ok(ArchiveIndex { file: file.to_path_buf(), kind, entries })
 }
@@ -125,6 +129,27 @@ fn read_7z_index(file: &Path) -> io::Result<Vec<ArchiveEntry>> {
             Some(ArchiveEntry { path: normalize(&f.name)?, is_dir: f.is_directory, size: f.size, modified, zip_index: 0 })
         })
         .collect())
+}
+
+/// MS-DOS date and time packed into one u32 (date in the high half), as RAR stores them.
+fn dos_time(packed: u32) -> Option<SystemTime> {
+    use chrono::{Local, TimeZone};
+    let (date, time) = (packed >> 16, packed & 0xFFFF);
+    Local
+        .with_ymd_and_hms(1980 + (date >> 9) as i32, (date >> 5) & 0xF, date & 0x1F, time >> 11, (time >> 5) & 0x3F, (time & 0x1F) * 2)
+        .single()
+        .map(SystemTime::from)
+}
+
+fn read_rar_index(file: &Path) -> io::Result<Vec<ArchiveEntry>> {
+    let archive = unrar::Archive::new(file).open_for_listing().map_err(|e| io::Error::other(e.to_string()))?;
+    let mut entries = Vec::new();
+    for header in archive {
+        let header = header.map_err(|e| io::Error::other(e.to_string()))?;
+        let Some(path) = normalize(&header.filename.to_string_lossy()) else { continue };
+        entries.push(ArchiveEntry { path, is_dir: header.is_directory(), size: header.unpacked_size, modified: dos_time(header.file_time), zip_index: 0 });
+    }
+    Ok(entries)
 }
 
 /// A tarball is a stream: the decompressor is always read from the start.
@@ -219,6 +244,55 @@ impl ArchiveIndex {
             Kind::Zip => self.extract_zip(&items, dest_dir, p),
             Kind::SevenZip => self.extract_7z(&items, dest_dir, p),
             Kind::Tar(c) => self.extract_tar(c, &items, dest_dir, p),
+            Kind::Rar => self.extract_rar(&items, dest_dir, p),
+        }
+    }
+
+    /// One pass over the archive; unwanted entries are skipped (solid archives still decode them).
+    fn extract_rar(&self, items: &[Item], dest_dir: &Path, p: &Progress) {
+        let mut wanted: HashMap<&str, (&PathBuf, u64)> = HashMap::new();
+        for entry in items {
+            if entry.is_dir {
+                if let Err(e) = fs::create_dir_all(dest_dir.join(&entry.rel)) {
+                    p.fail(format!("{}: {e}", entry.path));
+                }
+            } else {
+                wanted.insert(entry.path.as_str(), (&entry.rel, entry.size));
+            }
+        }
+        let result = (|| -> Result<(), unrar::error::UnrarError> {
+            let mut archive = unrar::Archive::new(&self.file).open_for_processing()?;
+            while let Some(header) = archive.read_header()? {
+                if p.cancelled() || wanted.is_empty() {
+                    break;
+                }
+                let name = normalize(&header.entry().filename.to_string_lossy());
+                archive = match name.and_then(|n| wanted.remove(n.as_str())) {
+                    Some((rel, size)) => {
+                        let target = dest_dir.join(rel);
+                        match prepare_parent(&target).map(|_| jobs::claim_target(&target, p)) {
+                            Ok(Some(target)) => {
+                                let next = header.extract_to(&target)?;
+                                p.done.fetch_add(size, std::sync::atomic::Ordering::Relaxed);
+                                next
+                            }
+                            Ok(None) => {
+                                p.done.fetch_add(size, std::sync::atomic::Ordering::Relaxed);
+                                header.skip()?
+                            }
+                            Err(e) => {
+                                p.fail(format!("{}: {e}", target.display()));
+                                header.skip()?
+                            }
+                        }
+                    }
+                    None => header.skip()?,
+                };
+            }
+            Ok(())
+        })();
+        if let Err(e) = result {
+            p.fail(format!("{}: {e}", self.file.display()));
         }
     }
 
@@ -797,6 +871,31 @@ mod tests {
         }
         assert!(!is_archive(Path::new("a.gz")));
         assert!(!is_archive(Path::new("tar")));
+    }
+
+    #[test]
+    fn rar_is_listed_and_extracted() {
+        let dir = scratch("rar");
+        let rar = dir.join("solid.rar");
+        fs::copy(concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/solid.rar"), &rar).unwrap();
+        assert!(is_archive(&rar));
+
+        let idx = open(&rar).unwrap();
+        let top: Vec<String> = idx.list("").into_iter().map(|e| e.name).collect();
+        assert!(!top.is_empty(), "the sample archive has entries");
+        let out = dir.join("out");
+        fs::create_dir(&out).unwrap();
+        let p = Progress::default();
+        idx.extract(&top, &out, &p);
+        assert!(p.errors().is_empty(), "{:?}", p.errors());
+        assert!(fs::read_dir(&out).unwrap().count() > 0, "files were written");
+
+        // Extracting again hits the conflict path; "skip all" must leave the files alone and not fail.
+        let p = Progress::default();
+        p.resolve(jobs::Resolution::Skip, true);
+        idx.extract(&top, &out, &p);
+        assert!(p.errors().is_empty(), "{:?}", p.errors());
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
