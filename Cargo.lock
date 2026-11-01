@@ -1330,7 +1330,7 @@ dependencies = [
 
 [[package]]
 name = "gc-app"
-version = "0.13.1"
+version = "0.14.0"
 dependencies = [
  "chrono",
  "eframe",
@@ -1349,7 +1349,7 @@ dependencies = [
 
 [[package]]
 name = "gc-archive"
-version = "0.13.1"
+version = "0.14.0"
 dependencies = [
  "chrono",
  "flate2",
@@ -1364,15 +1364,19 @@ dependencies = [
 
 [[package]]
 name = "gc-core"
-version = "0.13.1"
+version = "0.14.0"
 dependencies = [
+ "crc32fast",
+ "md-5",
+ "sha1",
+ "sha2 0.10.9",
  "trash",
  "windows-sys 0.59.0",
 ]
 
 [[package]]
 name = "gc-sysinfo"
-version = "0.13.1"
+version = "0.14.0"
 dependencies = [
  "gc-core",
  "windows 0.58.0",
@@ -1992,7 +1996,7 @@ version = "0.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1c46f3fcd2e888afdb01a07efc071cb21300e07c68d32c3e8b01b5c8cb1fcaa"
 dependencies = [
- "sha2",
+ "sha2 0.11.1",
 ]
 
 [[package]]
@@ -2002,6 +2006,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "62bb907fe88d54d8d9ce32a3cceab4218ed2f6b7d35617cafe9adf84e43919cb"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "md-5"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d89e7ee0cfbedfc4da3340218492196241d89eefb6dab27de5df917a6d2e78cf"
+dependencies = [
+ "cfg-if",
+ "digest 0.10.7",
 ]
 
 [[package]]
@@ -3021,7 +3035,7 @@ dependencies = [
  "js-sys",
  "lzma-rust2",
  "ppmd-rust",
- "sha2",
+ "sha2 0.11.1",
  "wasm-bindgen",
 ]
 
@@ -3030,6 +3044,17 @@ name = "sha1"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest 0.10.7",
+]
+
+[[package]]
+name = "sha2"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.2.17",

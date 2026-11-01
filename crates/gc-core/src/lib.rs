@@ -1,6 +1,7 @@
 //! Core logic for Ghost Commander: directory listing, no UI dependencies.
 
 pub mod filetype;
+pub mod hash;
 pub mod jobs;
 
 use std::fs;

@@ -120,3 +120,5 @@ Info > System Info shows a scrollable summary in the style of EFI Commander's F9
 ## Sorting and quick filter
 
 Click a column heading (Name, Size, Date) to sort, click again to reverse; Ctrl+F3 sorts by name, Ctrl+F4 by extension, Ctrl+F5 by date, Ctrl+F6 by size. Folders always stay on top. Ctrl+F opens the quick filter under the list: typing narrows the panel to names containing the text (case-insensitive), Enter keeps the filtered list and gives the keyboard back, Esc clears it; entering another folder clears it too. RAR archives are read through the UnRAR library (extraction only; no RAR creation exists, by licence).
+
+Ctrl+H (or Tools > Checksums) calculates CRC-32, MD5, SHA-1 and SHA-256 of the marked files, or of the file under the cursor, in one read pass; several files are hashed in parallel. Paste a checksum into "Compare with" and the matching value lights up. Folders are skipped and files inside archives are not supported yet.
