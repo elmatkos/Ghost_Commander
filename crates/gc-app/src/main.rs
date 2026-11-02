@@ -7,6 +7,7 @@ mod drive_bar;
 mod help_window;
 mod options;
 mod image_viewer;
+mod log;
 mod panel;
 mod shell_menu;
 mod sysinfo_window;
@@ -75,6 +76,8 @@ struct App {
     /// Archive files being extracted for F3 / F4 / Enter, with what to do when ready.
     extractions: Vec<(std::sync::mpsc::Receiver<std::io::Result<PathBuf>>, FileUse)>,
 }
+
+static FIRST_FRAME_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -663,10 +666,23 @@ impl App {
 
 impl eframe::App for App {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        log::log("on_exit called");
         gc_archive::cleanup_nested();
     }
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        log::frame_edge(true);
+        self.update_inner(ctx, frame);
+        log::frame_edge(false);
+    }
+}
+
+impl App {
+    fn update_inner(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        static FIRST_FRAME: std::sync::Once = std::sync::Once::new();
+        FIRST_FRAME.call_once(|| log::log("first frame"));
+        let first = !FIRST_FRAME_DONE.swap(true, Ordering::Relaxed);
+        let step = |what: &str| if first { log::log(&format!("frame 1: {what}")) };
         let dialog_open = self.dialog.is_some()
             || self.about.open
             || self.help.open
@@ -689,11 +705,14 @@ impl eframe::App for App {
                 });
             }
         }
+        step("keys handled");
         self.poll_jobs();
+        step("jobs polled");
         // Notice files created or removed outside the app (or by a tool such as Save .crc).
         for p in &mut self.panels {
             p.refresh_if_changed();
         }
+        step("panels refreshed");
         ctx.request_repaint_after(Duration::from_secs(1));
 
         egui::TopBottomPanel::top("menu").show(ctx, |ui| {
@@ -741,6 +760,7 @@ impl eframe::App for App {
             show_hints(ui);
         });
 
+        step("menu and bottom bar drawn");
         let mut clicked: Option<usize> = None;
         let mut bar_click: Option<(usize, drive_bar::Click)> = None;
         let drives = self.drives.lock().map(|d| d.clone()).unwrap_or_default();
@@ -759,6 +779,7 @@ impl eframe::App for App {
                 }
             });
         });
+        step("panels drawn");
         if let Some(i) = clicked {
             self.active = i;
         }
@@ -777,6 +798,7 @@ impl eframe::App for App {
         self.handle_panel_actions(ctx, frame);
         self.poll_extractions(ctx);
 
+        step("panel actions handled");
         self.show_dialog(ctx);
         self.show_conflict(ctx);
         self.about.show(ctx);
@@ -797,6 +819,7 @@ impl eframe::App for App {
         if self.jobs.iter().any(|j| !j.job.progress.finished.load(Ordering::Acquire)) {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
+        step("update finished");
     }
 }
 
@@ -864,6 +887,21 @@ fn show_hints(ui: &mut egui::Ui) {
 }
 
 fn main() -> eframe::Result<()> {
+    log::init();
+    log::start_watchdog();
+    // WinPE package: a Mesa opengl32.dll (software OpenGL, there is no GPU driver) sits beside the exe.
+    // Keep it on its pure software rasteriser (its d3d12 back end needs DLLs WinPE lacks) and limit
+    // the threads (the default, one per core, hung or powered off an 8-core AMD laptop).
+    // Normal installs have no such DLL, so a real OpenGL driver is never touched.
+    let mesa_beside_exe = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("libgallium_wgl.dll").is_file())).unwrap_or(false);
+    if mesa_beside_exe {
+        log::log("bundled Mesa found: software OpenGL (llvmpipe)");
+        for (key, value) in [("GALLIUM_DRIVER", "llvmpipe"), ("MESA_D3D12_DEFAULT_ADAPTER_NAME", "none"), ("LP_NUM_THREADS", "4")] {
+            if std::env::var_os(key).is_none() {
+                std::env::set_var(key, value);
+            }
+        }
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(concat!("Ghost Commander v", env!("CARGO_PKG_VERSION")))
@@ -871,7 +909,28 @@ fn main() -> eframe::Result<()> {
             .with_inner_size([1200.0, 700.0]),
         ..Default::default()
     };
-    eframe::run_native("Ghost Commander", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
+    log::log("starting eframe (OpenGL window)");
+    let result = eframe::run_native(
+        "Ghost Commander",
+        options,
+        Box::new(|cc| {
+            use eframe::glow::HasContext;
+            if let Some(gl) = cc.gl.as_ref() {
+                // SAFETY: plain string queries on the current context.
+                let (vendor, renderer, version) = unsafe { (gl.get_parameter_string(eframe::glow::VENDOR), gl.get_parameter_string(eframe::glow::RENDERER), gl.get_parameter_string(eframe::glow::VERSION)) };
+                log::log(&format!("OpenGL: {vendor} / {renderer} / {version}"));
+            }
+            log::log("window and GL context created, building the app");
+            let app = App::new(cc);
+            log::log("app built, entering the UI loop");
+            Ok(Box::new(app))
+        }),
+    );
+    match &result {
+        Ok(()) => log::log("eframe exited normally"),
+        Err(e) => log::log(&format!("eframe FAILED: {e:?}")),
+    }
+    result
 }
 
 /// Win32 handle of the main window, needed to own the shell context menu.

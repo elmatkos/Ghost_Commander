@@ -11,6 +11,14 @@ use windows::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_
 use windows::Win32::System::SystemInformation::{GetFirmwareType, GetSystemFirmwareTable, GetTickCount64, GlobalMemoryStatusEx, FIRMWARE_TABLE_PROVIDER, FIRMWARE_TYPE, MEMORYSTATUSEX};
 use windows::Win32::System::TpmBaseServices::{Tbsi_GetDeviceInfo, TPM_DEVICE_INFO};
 
+/// True when the DLL can be loaded; the optional DLLs are delay-loaded so the exe also starts without them (WinPE).
+fn dll_available(name: &str) -> bool {
+    use windows::Win32::System::LibraryLoader::LoadLibraryW;
+    let name = wide(name);
+    // SAFETY: NUL-terminated name; the handle is intentionally kept (the DLL is needed afterwards).
+    unsafe { LoadLibraryW(PCWSTR(name.as_ptr())).is_ok() }
+}
+
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
 }
@@ -84,6 +92,10 @@ pub fn is_uefi() -> Option<bool> {
 
 /// TPM spec version as reported by the TPM Base Services ("2.0", "1.2").
 pub fn tpm_version() -> Option<&'static str> {
+    // WinPE has no tbs.dll; it is delay-loaded, so check before the first call.
+    if !dll_available("tbs.dll") {
+        return None;
+    }
     // SAFETY: the struct is plain data, zero-initialised, and its size is passed.
     unsafe {
         let mut info: TPM_DEVICE_INFO = zeroed();
@@ -154,9 +166,10 @@ fn pci_display_adapters() -> Vec<(String, PciId)> {
 pub fn gpus() -> Vec<Gpu> {
     // (name, pci id, dedicated memory) of the DXGI hardware adapters.
     let mut dxgi = Vec::new();
-    // SAFETY: plain COM calls on interfaces we own.
+    // SAFETY: plain COM calls on interfaces we own. WinPE has no dxgi.dll (delay-loaded).
     unsafe {
-        if let Ok(factory) = CreateDXGIFactory1::<IDXGIFactory1>() {
+        if !dll_available("dxgi.dll") {
+        } else if let Ok(factory) = CreateDXGIFactory1::<IDXGIFactory1>() {
             let mut i = 0;
             while let Ok(adapter) = factory.EnumAdapters1(i) {
                 i += 1;

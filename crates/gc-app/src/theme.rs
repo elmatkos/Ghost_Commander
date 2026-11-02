@@ -225,6 +225,9 @@ impl Theme {
         v.override_text_color = Some(self.text.0);
         v.selection.bg_fill = self.accent.0;
         v.hyperlink_color = self.accent.0;
+        // Pin egui's mode to the theme's base: otherwise egui follows the system theme (WinPE reports
+        // a different one) and the first frame switches away from the visuals set here.
+        ctx.set_theme(if self.dark { egui::Theme::Dark } else { egui::Theme::Light });
         ctx.set_visuals(v);
     }
 }

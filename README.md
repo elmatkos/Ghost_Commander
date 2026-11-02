@@ -133,3 +133,13 @@ The bottom line shows only the shortcuts for the modifier keys you hold: plain k
 F1 opens a Help window listing every function key and shortcut, grouped by modifier (function keys, Shift, Alt, Ctrl, moving around, mouse). About now lives only in the Help menu. F9 opens System Info; the theme editor is in Config > Themes.
 
 Copy and move (across drives) hand each file to Windows (`CopyFileExW`): the copy runs in the kernel, a network share can copy server to server, ReFS clones instead of copying, and timestamps, attributes and alternate streams are kept. Files of 256 MiB and more bypass the system cache so the RAM is not flushed. Up to four files are copied at once; if the source or target is a spinning disk (detected by the seek-penalty flag) one at a time, so the disk head does not thrash. On a test machine (SSD to SSD) 8000 small files went from 30 s to 4.4 s and a 3 GB file from 1.07 s to 0.9 s. `cargo run --release -p gc-core --example bench_copy -- <source> <destination folder>` times a copy; set `GC_COPY_THREADS=1` to force one file at a time. Moves on one drive are still instant renames.
+
+## Running under WinPE (v0.19.6+)
+
+The same exe runs in WinPE; only the package differs (`ghost-commander-vX-winpe-x64.zip`):
+
+- `ghost-commander.exe` is built with a static C runtime (`.cargo/config.toml`), so no VC++ redistributable is needed. `dxgi.dll` and `tbs.dll` (GPU and TPM rows of System Info) are delay-loaded and skipped when WinPE lacks them.
+- WinPE has no GPU driver and no OpenGL, so the zip carries Mesa's software OpenGL: `opengl32.dll` + `libgallium_wgl.dll` (Mesa 26.2.5 MSVC release from `pal1000/mesa-dist-win`, not stored in the repo). When `libgallium_wgl.dll` is beside the exe, the app sets `GALLIUM_DRIVER=llvmpipe` and `LP_NUM_THREADS=4` (unless already set); the default of one thread per core hung an 8-core AMD laptop. Normal installs have no such DLL and use the real driver.
+- The theme is pinned to egui's dark/light mode, otherwise WinPE's system theme overrode the chosen one on the first frame.
+- `gc.log` next to the exe records startup steps, the OpenGL renderer, panics, crashes and UI stalls longer than 5 s.
+- Tested on Lenovo L13 G3 AMD and L16 G2 Intel, WinPE 10.0.26100 booted from SCCM.
