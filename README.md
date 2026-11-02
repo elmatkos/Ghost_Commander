@@ -59,6 +59,7 @@ Run: `cargo run --release` (binary `ghost-commander`). Test: `cargo test`.
 Branding lives in `assets/` (`icon.ico` is embedded into the exe by `crates/gc-app/build.rs`, `logo_512.png` is shown in the About window, Help > About).
 
 ## TODO (backlog)
+- Verify v0.19.0 copy: measure parallel file counts (1/2/4/8/16), test copies between C: D: F: G:, check how parallel copying looks in the GUI.
 
 **M1 gaps**
 - Sortable columns (name, size, date), quick filter.
