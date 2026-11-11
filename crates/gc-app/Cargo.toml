@@ -20,6 +20,7 @@ serde = { version = "1", features = ["derive"] }
 gc-archive = { path = "../gc-archive" }
 gc-sysinfo = { path = "../gc-sysinfo" }
 gc-ftp = { path = "../gc-ftp" }
+gc-dism = { path = "../gc-dism" }
 raw-window-handle = "0.6"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp", "ico"] }
 

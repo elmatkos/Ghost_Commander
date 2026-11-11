@@ -68,7 +68,7 @@ fn info_icon(ui: &mut egui::Ui) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
     let color = if resp.hovered() { ui.visuals().strong_text_color() } else { ui.visuals().weak_text_color() };
     let painter = ui.painter();
-    painter.circle_stroke(rect.center(), 7.0, egui::Stroke::new(1.3, color));
+    painter.circle_stroke(rect.center(), 7.0, egui::Stroke::new(1.3_f32, color));
     painter.text(rect.center(), egui::Align2::CENTER_CENTER, "i", egui::FontId::proportional(11.0), color);
     resp
 }

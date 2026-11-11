@@ -13,6 +13,9 @@ pub struct SysInfoWindow {
     pub open: bool,
     info: Option<SysInfo>,
     loading: Option<Receiver<SysInfo>>,
+    /// Scroll position and visible height, so the arrow keys can move the view.
+    scroll: f32,
+    page: f32,
 }
 
 fn section_icon(title: &str) -> &'static str {
@@ -71,7 +74,28 @@ impl SysInfoWindow {
                 }
             });
             ui.separator();
-            egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            let (up, down, pgup, pgdn, home, end) = ctx.input(|i| (i.key_pressed(Key::ArrowUp), i.key_pressed(Key::ArrowDown), i.key_pressed(Key::PageUp), i.key_pressed(Key::PageDown), i.key_pressed(Key::Home), i.key_pressed(Key::End)));
+            let page = self.page.max(100.0);
+            if up {
+                self.scroll -= 40.0;
+            }
+            if down {
+                self.scroll += 40.0;
+            }
+            if pgup {
+                self.scroll -= page * 0.9;
+            }
+            if pgdn {
+                self.scroll += page * 0.9;
+            }
+            if home {
+                self.scroll = 0.0;
+            }
+            if end {
+                self.scroll = 1.0e7;
+            }
+            self.scroll = self.scroll.max(0.0);
+            let out = egui::ScrollArea::vertical().auto_shrink(false).vertical_scroll_offset(self.scroll).show(ui, |ui| {
                 let Some(info) = &self.info else { return };
                 for (n, section) in info.sections.iter().enumerate() {
                     ui.add_space(if n == 0 { 0.0 } else { 10.0 });
@@ -86,6 +110,9 @@ impl SysInfoWindow {
                     });
                 }
             });
+            // Keep what egui really used (it clamps, and the mouse wheel and scroll bar move it too).
+            self.scroll = out.state.offset.y;
+            self.page = out.inner_rect.height();
         });
         self.open = open && !ctx.input(|i| i.key_pressed(Key::Escape));
         if refresh {

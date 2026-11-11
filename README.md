@@ -2,7 +2,7 @@
 
 A fast, modern, dual-pane file manager written in Rust. It follows the Norton / Total / Midnight Commander tradition and aims to keep every feature of those three while improving on them.
 
-**Status:** v0.21.2, Windows (x64), actively developed. Also runs under WinPE.
+**Status:** v0.22.0, Windows (x64), actively developed. Also runs under WinPE.
 
 **Repo:** https://github.com/elmatkos/Ghost_Commander
 
@@ -35,14 +35,15 @@ Ghost_Commander/
     gc-archive/         archive providers (7z, zip, tar, rar read) browsed as folders
     gc-sysinfo/         system information (SMBIOS, CPU, TPM, drives, ...)
     gc-ftp/             FTP / FTPS client, ftp:// link parsing, saved sessions
+    gc-dism/            DISM image mounting: mounted-image query, WIM image list, background dism.exe jobs
     gc-app/             egui app: panels, viewers, themes, dialogs (binary ghost-commander)
 ```
 
 ## Roadmap
 
-Done: dual panes, file operations with job queue, archives as folders (extract/pack), text and image viewers, checksums and verify, themes, System Info, fast copy, WinPE support, FTP / FTPS client.
+Done: dual panes, file operations with job queue, archives as folders (extract/pack), text and image viewers, checksums and verify, themes, System Info, fast copy, WinPE support, FTP / FTPS client, tabs, DISM manager.
 
-Planned: file compare, sync dirs, multi-rename, search (incl. in archives), tabs, bookmarks, plugins/commands config, SFTP.
+Planned: file compare, sync dirs, multi-rename, search (incl. in archives), bookmarks, plugins/commands config, SFTP.
 
 ## How to run
 
@@ -55,7 +56,6 @@ Dual panes, keyboard navigation (arrows, PgUp/PgDn, Home/End, Tab, Enter, Backsp
 Branding lives in `assets/` (`icon.ico` is embedded into the exe by `crates/gc-app/build.rs`, `logo_512.png` is shown in the About window, Help > About).
 
 ## TODO (backlog)
-- **Tabs**: several folders per panel (Ctrl+T new, Ctrl+W close, Ctrl+Tab next), remembered between runs like the panel folders.
 - FTP: implicit FTPS (port 990), SFTP, upload back after F4 on a server file, server-to-server copy, transfers in parallel with browsing (a transfer currently holds the connection).
 - Verify v0.19.0 copy: measure parallel file counts (1/2/4/8/16), test copies between C: D: F: G:, check how parallel copying looks in the GUI.
 
@@ -110,6 +110,20 @@ The menu bar has Config (Options..., Themes...) and Help (About). Config > Optio
 
 Info > System Info (F9) shows a scrollable summary in the style of EFI Commander's F9 view (crate `gc-sysinfo`): system and board (SMBIOS), BIOS and EC version, boot mode, Secure Boot, TPM, BIOS passwords, CPU with speed, cores, threads and the SIMD/crypto features it offers (SSE4.2, AVX2, AVX-512, SHA, AES, ...), memory with every installed module, GPUs and displays, battery, drives and the Windows build. Rows a machine does not expose are left out. The data is gathered on a worker thread; Copy puts it all on the clipboard as text. `cargo run -p gc-sysinfo --example dump` prints the same without the GUI.
 
+## Tabs
+
+Each side has a tab strip above the drive buttons: click a tab to switch, `+` opens a new tab in the same folder, `x` or a middle click closes one. Keyboard: Ctrl+T new tab, Ctrl+W close, Ctrl+Tab / Ctrl+Shift+Tab next / previous tab of the active side. Both sides reopen their tabs (and the shown one) at the next start (`left_tabs`, `right_tabs`, `left_tab`, `right_tab` in `settings.toml`). The last tab of a side cannot be closed.
+
+## DISM manager
+
+Tools > DISM manager (Ctrl+D) is a GUI for mounting Windows images (crate `gc-dism`, it drives `dism.exe`):
+
+- **Mount**: pick a `.wim` / `.esd` / `.swm` (or press *Use file under cursor*), choose the image from the list (read from the file itself, no admin rights needed) and a mount folder. The folder is created when it does not exist; it must be empty. Optional read-only mount. The suggested folder is `mount` next to the image.
+- **Always knows what is mounted**: the state is read from Windows (`Get-WindowsImage -Mounted`) at start, whenever the window opens, after every job and every five minutes, so images mounted by other tools or before a restart show up too. Ghost Commander additionally remembers when it mounted an image (`dism_mounts.toml` in `%APPDATA%\Ghost Commander\`).
+- **Badge in the menu bar**: after *Help* a highlighted *n WIM mounted* button appears while something is mounted (red when a mount needs a remount), and *DISM working 42%* while a job runs. Hover lists the mounts, a click opens the manager.
+- **Update / commit**: files added to the mounted folder are saved with *Commit (keep mounted)*, or *Commit and unmount*; *Discard and unmount* (asks first) drops all changes. Panels and tabs showing the folder move out of it first. *Remount* revives a mount interrupted by a reboot, *Clean up orphaned mounts* runs `/Cleanup-Wim`. *Show in panel* opens the mount in the active panel.
+- **Administrator**: DISM needs it. When Ghost Commander is not elevated, each job asks for approval (UAC) and its output is followed live (progress bar and log); mounted Windows images are also often unreadable without elevation. `cargo run -p gc-dism --example probe -- <wim> <new mount folder>` runs mount, commit and unmount against the real DISM.
+
 ## Sorting and quick filter
 
 Click a column heading (Name, Size, Date) to sort, click again to reverse; Ctrl+F3 sorts by name, Ctrl+F4 by extension, Ctrl+F5 by date, Ctrl+F6 by size. Folders always stay on top. Ctrl+F opens the quick filter under the list: typing narrows the panel to names containing the text (case-insensitive), Enter keeps the filtered list and gives the keyboard back, Esc clears it; entering another folder clears it too.
@@ -122,7 +136,7 @@ Panels refresh themselves when files appear, disappear or are renamed in the sho
 
 The bottom line shows only the shortcuts for the modifier keys you hold: plain keys normally, the Shift ones while Shift is held, likewise Ctrl and Alt. Only as many as fit the window width are shown.
 
-F1 opens a Help window listing every function key and shortcut, grouped by modifier (function keys, Shift, Alt, Ctrl, FTP, moving around, mouse). Alt+F1 / Alt+F2 (and Ctrl+1 / Ctrl+2) pick a drive for the left / right panel. About now lives only in the Help menu. F9 opens System Info; the theme editor is in Config > Themes.
+F1 opens a Help window listing every function key and shortcut, grouped by modifier (function keys, Shift, Alt, Ctrl, FTP, moving around, mouse). Alt+F1 / Alt+F2 (and Ctrl+1 / Ctrl+2) pick a drive for the left / right panel. About now lives only in the Help menu. F9 opens System Info (scroll it with Up / Down / PgUp / PgDn / Home / End); the theme editor is in Config > Themes.
 
 Copy and move (across drives) hand each file to Windows (`CopyFileExW`): the copy runs in the kernel, a network share can copy server to server, ReFS clones instead of copying, and timestamps, attributes and alternate streams are kept. Files of 256 MiB and more bypass the system cache so the RAM is not flushed. Up to four files are copied at once; if the source or target is a spinning disk (detected by the seek-penalty flag) one at a time, so the disk head does not thrash. On a test machine (SSD to SSD) 8000 small files went from 30 s to 4.4 s and a 3 GB file from 1.07 s to 0.9 s. `cargo run --release -p gc-core --example bench_copy -- <source> <destination folder>` times a copy; set `GC_COPY_THREADS=1` to force one file at a time. Moves on one drive are still instant renames.
 

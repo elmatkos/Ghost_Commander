@@ -3,6 +3,7 @@
 
 mod about;
 mod checksums_window;
+mod dism_window;
 mod drive_bar;
 mod ftp_window;
 mod help_window;
@@ -12,6 +13,7 @@ mod log;
 mod panel;
 mod shell_menu;
 mod sysinfo_window;
+mod tabs;
 mod theme;
 mod theme_editor;
 mod verify_window;
@@ -25,6 +27,7 @@ use std::time::Duration;
 use eframe::egui::{self, Key};
 use gc_core::jobs::{self, Job, Op, Resolution};
 use about::About;
+use dism_window::DismWindow;
 use ftp_window::{FtpLogWindow, FtpWindow};
 use help_window::HelpWindow;
 use gc_archive::{ArchiveIndex, PackFormat};
@@ -83,6 +86,7 @@ struct App {
     verify: VerifyWindow,
     ftp_win: FtpWindow,
     ftp_log: FtpLogWindow,
+    dism: DismWindow,
     /// Command line under the panels: text, focus request, focus last frame, history.
     cmd_text: String,
     cmd_focus: bool,
@@ -90,7 +94,11 @@ struct App {
     cmd_history: Vec<String>,
     cmd_pos: Option<usize>,
     /// Folders last written to settings (to notice a change and save the new ones).
-    saved_dirs: [PathBuf; 2],
+    saved_dirs: [Vec<PathBuf>; 2],
+    saved_cur: [usize; 2],
+    /// The other tabs of each side (the shown one is `panels[i]`, at position `cur_tab[i]` in the strip).
+    parked: [Vec<Panel>; 2],
+    cur_tab: [usize; 2],
     /// Drive list with free space, refreshed by a background thread (a dead network drive can block).
     drives: Arc<std::sync::Mutex<Vec<gc_core::DriveInfo>>>,
     viewer: Viewer,
@@ -108,8 +116,27 @@ impl App {
         // Open the folders the panels showed last time (when they still exist).
         let saved = theme::load_settings();
         let remembered = |d: &Option<String>| d.as_ref().map(PathBuf::from).filter(|p| p.is_dir()).unwrap_or_else(|| start.clone());
-        let (left, right) = (remembered(&saved.left_dir), remembered(&saved.right_dir));
-        let mut panels = [Panel::new(left.clone(), cc.egui_ctx.clone()), Panel::new(right.clone(), cc.egui_ctx.clone())];
+        let build = |tabs: &[String], single: &Option<String>, cur: usize| -> (Panel, Vec<Panel>, usize) {
+            let mut dirs: Vec<PathBuf> = tabs.iter().map(PathBuf::from).filter(|p| p.is_dir()).collect();
+            if dirs.is_empty() {
+                dirs.push(remembered(single));
+            }
+            let cur = cur.min(dirs.len() - 1);
+            let mut live = None;
+            let mut parked = Vec::new();
+            for (k, d) in dirs.into_iter().enumerate() {
+                let panel = Panel::new(d, cc.egui_ctx.clone());
+                if k == cur {
+                    live = Some(panel);
+                } else {
+                    parked.push(panel);
+                }
+            }
+            (live.expect("one tab"), parked, cur)
+        };
+        let (l, lp, lc) = build(&saved.left_tabs, &saved.left_dir, saved.left_tab);
+        let (r, rp, rc) = build(&saved.right_tabs, &saved.right_dir, saved.right_tab);
+        let mut panels = [l, r];
         // `ghost-commander ftp://user:pass@host/dir` connects the left panel right away.
         if let Some(link) = std::env::args().nth(1).filter(|a| a.to_ascii_lowercase().starts_with("ftp")) {
             if let Ok(target) = gc_ftp::Target::from_url(&link) {
@@ -118,8 +145,16 @@ impl App {
         }
         Self {
             panels,
-            saved_dirs: [left, right],
+            saved_dirs: [Vec::new(), Vec::new()],
+            saved_cur: [usize::MAX; 2],
+            parked: [lp, rp],
+            cur_tab: [lc, rc],
             ftp_win: FtpWindow::default(),
+            dism: {
+                let mut d = DismWindow::default();
+                d.refresh(&cc.egui_ctx);
+                d
+            },
             ftp_log: FtpLogWindow::default(),
             cmd_text: String::new(),
             cmd_focus: false,
@@ -236,13 +271,79 @@ impl App {
 
     /// Remembers the folders of both panels for the next start.
     fn save_dirs_if_changed(&mut self) {
-        let dirs = [self.panels[0].restore_dir(), self.panels[1].restore_dir()];
-        if dirs != self.saved_dirs {
+        let dirs = [self.side_dirs(0), self.side_dirs(1)];
+        if dirs != self.saved_dirs || self.cur_tab != self.saved_cur {
             let mut s = theme::load_settings();
-            s.left_dir = Some(dirs[0].display().to_string());
-            s.right_dir = Some(dirs[1].display().to_string());
+            let text = |v: &[PathBuf]| v.iter().map(|d| d.display().to_string()).collect::<Vec<_>>();
+            s.left_dir = Some(self.panels[0].restore_dir().display().to_string());
+            s.right_dir = Some(self.panels[1].restore_dir().display().to_string());
+            s.left_tabs = text(&dirs[0]);
+            s.right_tabs = text(&dirs[1]);
+            s.left_tab = self.cur_tab[0];
+            s.right_tab = self.cur_tab[1];
             let _ = theme::save_settings(&s);
             self.saved_dirs = dirs;
+            self.saved_cur = self.cur_tab;
+        }
+    }
+
+    /// Folders of all tabs of a side, in strip order.
+    fn side_dirs(&self, i: usize) -> Vec<PathBuf> {
+        let mut v: Vec<PathBuf> = self.parked[i].iter().map(Panel::restore_dir).collect();
+        v.insert(self.cur_tab[i].min(v.len()), self.panels[i].restore_dir());
+        v
+    }
+
+    fn side_titles(&self, i: usize) -> Vec<String> {
+        let mut v: Vec<String> = self.parked[i].iter().map(Panel::tab_title).collect();
+        v.insert(self.cur_tab[i].min(v.len()), self.panels[i].tab_title());
+        v
+    }
+
+    /// Opens a tab next to the current one, showing the same folder, and switches to it.
+    fn new_tab(&mut self, i: usize, ctx: &egui::Context) {
+        let dir = self.panels[i].disk_folder().map(Path::to_path_buf).unwrap_or_else(|| self.panels[i].restore_dir());
+        let old = std::mem::replace(&mut self.panels[i], Panel::new(dir, ctx.clone()));
+        self.parked[i].insert(self.cur_tab[i], old);
+        self.cur_tab[i] += 1;
+    }
+
+    /// Closes the shown tab (the last one of a side cannot be closed); the next one, else the previous, is shown.
+    fn close_tab(&mut self, i: usize) {
+        let cur = self.cur_tab[i];
+        if self.parked[i].is_empty() {
+            return;
+        }
+        let idx = if cur < self.parked[i].len() { cur } else { cur - 1 };
+        self.panels[i] = self.parked[i].remove(idx);
+        self.cur_tab[i] = if idx == cur { cur } else { cur - 1 };
+    }
+
+    fn switch_tab(&mut self, i: usize, k: usize) {
+        let cur = self.cur_tab[i];
+        if k == cur || k > self.parked[i].len() {
+            return;
+        }
+        let idx = if k < cur { k } else { k - 1 };
+        std::mem::swap(&mut self.panels[i], &mut self.parked[i][idx]);
+        let old = self.parked[i].remove(idx);
+        self.parked[i].insert(if cur < k { cur } else { cur - 1 }, old);
+        self.cur_tab[i] = k;
+    }
+
+    fn step_tab(&mut self, i: usize, delta: isize) {
+        let n = self.parked[i].len() + 1;
+        let k = (self.cur_tab[i] as isize + delta).rem_euclid(n as isize) as usize;
+        self.switch_tab(i, k);
+    }
+
+    /// Moves every panel (and tab) that shows something inside `dir` to its parent, so it can be unmounted.
+    fn leave_folder(&mut self, dir: &Path) {
+        let Some(parent) = dir.parent().map(Path::to_path_buf) else { return };
+        for p in self.panels.iter_mut().chain(self.parked.iter_mut().flatten()) {
+            if !p.is_ftp() && p.cwd.starts_with(dir) {
+                p.open_root(parent.clone());
+            }
         }
     }
 
@@ -550,6 +651,20 @@ impl App {
             if pressed(ctx, Key::N) {
                 self.ftp_win.open();
             }
+            if pressed(ctx, Key::D) {
+                let f = self.panels[self.active].current_file();
+                self.dism.open_with(ctx, f);
+            }
+            if pressed(ctx, Key::T) {
+                self.new_tab(self.active, ctx);
+            }
+            if pressed(ctx, Key::W) {
+                self.close_tab(self.active);
+            }
+            if pressed(ctx, Key::Tab) {
+                let back = ctx.input(|i| i.modifiers.shift);
+                self.step_tab(self.active, if back { -1 } else { 1 });
+            }
         }
         let panel = &mut self.panels[self.active];
         if pressed(ctx, Key::ArrowDown) {
@@ -579,7 +694,7 @@ impl App {
         if pressed(ctx, Key::Space) || pressed(ctx, Key::Insert) {
             panel.toggle_mark_and_advance();
         }
-        if pressed(ctx, Key::Tab) {
+        if pressed(ctx, Key::Tab) && !ctrl {
             self.active = 1 - self.active;
         }
         // Consume the key: the window it opens also closes on the same key and must not see this press.
@@ -1181,6 +1296,7 @@ impl App {
             || self.checksums.open
             || self.verify.open
             || self.ftp_win.open
+            || self.dism.open
             || self.viewer.is_open()
             || self.jobs.iter().any(|j| j.job.progress.pending_conflict().is_some());
         if !dialog_open {
@@ -1219,6 +1335,11 @@ impl App {
                     }
                 });
                 ui.menu_button("Tools", |ui| {
+                    if ui.button("DISM manager...  (Ctrl+D)").clicked() {
+                        let f = self.panels[self.active].current_file();
+                        self.dism.open_with(ctx, f);
+                        ui.close_menu();
+                    }
                     if ui.button("Checksums...  (Ctrl+H)").clicked() {
                         self.open_checksums(ctx);
                         ui.close_menu();
@@ -1254,6 +1375,11 @@ impl App {
                         ui.close_menu();
                     }
                 });
+                // Shows only while a WIM is mounted or a DISM job runs.
+                if self.dism.badge(ui, &self.themes.active) {
+                    let f = self.panels[self.active].current_file();
+                    self.dism.open_with(ctx, f);
+                }
             });
         });
 
@@ -1268,18 +1394,22 @@ impl App {
 
         step("menu and bottom bar drawn");
         let mut clicked: Option<usize> = None;
+        let mut tab_click: Option<(usize, tabs::TabClick)> = None;
         let mut bar_click: Option<(usize, drive_bar::Click)> = None;
         let drives = self.drives.lock().map(|d| d.clone()).unwrap_or_default();
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.columns(2, |cols| {
                 for (i, col) in cols.iter_mut().enumerate() {
+                    if let Some(c) = tabs::show(col, &self.side_titles(i), self.cur_tab[i], self.active == i) {
+                        tab_click = Some((i, c));
+                    }
                     if self.options.drive_buttons {
                         if let Some(c) = drive_bar::show(col, &drives, &self.panels[i].cwd, &self.themes.active, self.options.drive_free_bar) {
                             bar_click = Some((i, c));
                         }
                         col.add_space(2.0);
                     }
-                    if self.panels[i].ui(col, &format!("panel{i}"), self.active == i, &self.themes.active) {
+                    if self.panels[i].ui(col, &format!("panel{i}_{}", self.cur_tab[i]), self.active == i, &self.themes.active) {
                         clicked = Some(i);
                     }
                 }
@@ -1288,6 +1418,17 @@ impl App {
         step("panels drawn");
         if let Some(i) = clicked {
             self.active = i;
+        }
+        if let Some((i, click)) = tab_click {
+            self.active = i;
+            match click {
+                tabs::TabClick::Select(k) => self.switch_tab(i, k),
+                tabs::TabClick::Close(k) => {
+                    self.switch_tab(i, k);
+                    self.close_tab(i);
+                }
+                tabs::TabClick::New => self.new_tab(i, ctx),
+            }
         }
         if let Some((i, click)) = bar_click {
             self.active = i;
@@ -1311,6 +1452,15 @@ impl App {
         self.help.show(ctx, &self.themes.active);
         self.themes.show(ctx);
         self.options.show(ctx);
+        self.dism.update(ctx);
+        let selected = if self.dism.open { self.panels[self.active].current_file() } else { None };
+        self.dism.show(ctx, &self.themes.active, selected);
+        if let Some(dir) = self.dism.take_leave() {
+            self.leave_folder(&dir);
+        }
+        if let Some(dir) = self.dism.take_show() {
+            self.panels[self.active].open_root(dir);
+        }
         self.sysinfo.show(ctx, &self.themes.active);
         self.checksums.show(ctx, &self.themes.active);
         self.verify.show(ctx, &self.themes.active);

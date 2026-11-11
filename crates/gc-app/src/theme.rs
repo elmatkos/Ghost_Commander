@@ -262,6 +262,11 @@ pub struct Settings {
     /// Folders the left / right panel showed when the app was last used.
     pub left_dir: Option<String>,
     pub right_dir: Option<String>,
+    /// Open tabs of each side (folders) and which one was shown.
+    pub left_tabs: Vec<String>,
+    pub right_tabs: Vec<String>,
+    pub left_tab: usize,
+    pub right_tab: usize,
     /// When the folder or drive a panel shows disappears (USB stick pulled): false = keep showing it
     /// and reload as soon as it is back, true = switch to the nearest existing folder / drive.
     pub switch_on_missing_drive: bool,
@@ -269,7 +274,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { theme: None, drive_buttons: true, drive_free_bar: true, left_dir: None, right_dir: None, switch_on_missing_drive: false }
+        Self { theme: None, drive_buttons: true, drive_free_bar: true, left_dir: None, right_dir: None, left_tabs: Vec::new(), right_tabs: Vec::new(), left_tab: 0, right_tab: 0, switch_on_missing_drive: false }
     }
 }
 

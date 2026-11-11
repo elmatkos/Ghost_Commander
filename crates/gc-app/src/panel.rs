@@ -545,6 +545,20 @@ impl Panel {
         self.select_next = Some(name.to_owned());
     }
 
+    /// Short name for the tab strip.
+    pub fn tab_title(&self) -> String {
+        let name = match self.cwd.file_name() {
+            Some(n) => n.to_string_lossy().into_owned(),
+            None => self.cwd.display().to_string(),
+        };
+        let name = if self.ftp.is_some() { format!("ftp: {name}") } else { name };
+        if name.chars().count() > 18 {
+            format!("{}...", name.chars().take(16).collect::<String>())
+        } else {
+            name
+        }
+    }
+
     /// The folder to open again at the next start: the server panel's previous folder, an archive's folder.
     pub fn restore_dir(&self) -> PathBuf {
         if let Some(v) = &self.ftp {

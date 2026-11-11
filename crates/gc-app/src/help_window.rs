@@ -4,7 +4,7 @@ use eframe::egui::{self, Key, RichText};
 
 use crate::theme::Theme;
 
-const GROUPS: [(&str, &[(&str, &str)]); 8] = [
+const GROUPS: [(&str, &[(&str, &str)]); 10] = [
     (
         "Function keys",
         &[
@@ -16,7 +16,7 @@ const GROUPS: [(&str, &[(&str, &str)]); 8] = [
             ("F6", "Move to the other panel; same editable dialog (move to the same folder with a new name = rename)"),
             ("F7", "Make folder"),
             ("F8 / Del", "Move to the recycle bin"),
-            ("F9", "System Info"),
+            ("F9", "System Info (Up / Down / PgUp / PgDn / Home / End scroll it)"),
         ],
     ),
     ("Shift", &[("Shift+F4", "Create a new empty file and edit it"), ("Shift+F6", "Rename"), ("Shift+F8 / Shift+Del", "Delete permanently")]),
@@ -34,6 +34,9 @@ const GROUPS: [(&str, &[(&str, &str)]); 8] = [
             ("Ctrl+F", "Quick filter (Enter keeps it, Esc clears it)"),
             ("Ctrl+H", "Checksums: CRC-32, MD5, SHA-1, SHA-256 (and Save .crc)"),
             ("Ctrl+1 / Ctrl+2", "Pick a drive for the left / right panel"),
+            ("Ctrl+T / Ctrl+W", "New tab (same folder) / close the tab"),
+            ("Ctrl+Tab / Ctrl+Shift+Tab", "Next / previous tab of the active side"),
+            ("Ctrl+D", "DISM manager: mount a WIM, commit / unmount"),
             ("Ctrl+N", "FTP connect: paste a link (ftp://user:password@host/dir) or pick a saved session"),
             ("Ctrl+F3 / F4 / F5 / F6", "Sort by name / extension / date / size (again = reverse)"),
         ],
@@ -57,6 +60,23 @@ const GROUPS: [(&str, &[(&str, &str)]); 8] = [
             ("F4", "Edit a local copy (not uploaded back)"),
             ("F7 / F8", "Create a folder / delete on the server"),
             ("Drive buttons, Alt+F1/F2", "Leave the server and show a local drive"),
+        ],
+    ),
+    (
+        "DISM manager (Tools menu, Ctrl+D)",
+        &[
+            ("Mount", "Pick a .wim / .esd (or Use file under cursor), an image and a folder; the folder is created when missing"),
+            ("Badge after Help", "Shown while an image is mounted (also one mounted by other tools or before a restart); click it to open the manager"),
+            ("Commit (keep mounted)", "Save the changes made in the folder into the WIM and stay mounted"),
+            ("Commit and unmount / Discard", "Save and unmount, or drop all changes; panels showing the folder move out of it first"),
+            ("Administrator", "DISM needs it: without it each job asks for approval (UAC)"),
+        ],
+    ),
+    (
+        "Tabs",
+        &[
+            ("+ / click / middle click", "Open a tab / switch / close (the strip above each panel)"),
+            ("Remembered", "Both sides reopen their tabs and the shown one at the next start"),
         ],
     ),
     (
