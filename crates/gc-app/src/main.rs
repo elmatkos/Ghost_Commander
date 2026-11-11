@@ -1200,6 +1200,7 @@ impl App {
         step("jobs polled");
         // Notice files created or removed outside the app (or by a tool such as Save .crc).
         for p in &mut self.panels {
+            p.switch_on_missing = self.options.switch_on_missing_drive;
             p.refresh_if_changed();
         }
         step("panels refreshed");
@@ -1344,7 +1345,9 @@ fn resolve_transfer(srcs: &[PathBuf], base: &Path, text: &str, is_move: bool) ->
     }
     let mut dest = PathBuf::from(t);
     if dest.is_relative() {
-        dest = base.join(dest);
+        // A bare name stays in the folder the item comes from, not in the other panel's folder.
+        let here = srcs.first().and_then(|s| s.parent()).unwrap_or(base);
+        dest = here.join(dest);
     }
     if let [src] = srcs {
         let trailing = t.ends_with(['\\', '/']);
@@ -1553,6 +1556,9 @@ mod tests {
         // the default text (dest folder + same name) is the exact target
         let op = resolve_transfer(&[file.clone()], &dest, &dest.join("a.txt").display().to_string(), false).unwrap();
         assert!(matches!(op, Op::CopyTo { target, .. } if target == dest.join("a.txt")));
+        // a bare name stays beside the source, not in the other panel's folder
+        let op = resolve_transfer(&[file.clone()], &dest, "copy.txt", false).unwrap();
+        assert!(matches!(op, Op::CopyTo { target, .. } if target == src_dir.join("copy.txt")));
         // a new name and a folder that does not exist yet
         let text = dest.join("new").join("b.dat").display().to_string();
         assert!(matches!(resolve_transfer(&[file.clone()], &dest, &text, true).unwrap(), Op::MoveTo { .. }));

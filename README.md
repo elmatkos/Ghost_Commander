@@ -2,7 +2,7 @@
 
 A fast, modern, dual-pane file manager written in Rust. It follows the Norton / Total / Midnight Commander tradition and aims to keep every feature of those three while improving on them.
 
-**Status:** v0.21.0, Windows (x64), actively developed. Also runs under WinPE.
+**Status:** v0.21.1, Windows (x64), actively developed. Also runs under WinPE.
 
 **Repo:** https://github.com/elmatkos/Ghost_Commander
 
@@ -149,6 +149,8 @@ Live round trip test against a server: `GC_FTP_TEST_URL=ftp://user:pass@127.0.0.
 ## Remembered folders
 
 Both panels reopen the folders they showed when the app was closed (`left_dir`, `right_dir` in `settings.toml`; a folder that no longer exists falls back to the current folder). While a panel shows an archive or a server, the folder it was opened from is remembered.
+
+**Vanished drives (Config > Options > When a drive disappears):** by default a panel keeps showing the path of a removed drive (USB stick, share) and loads it again when it returns; the other choice (`switch_on_missing_drive = true`) jumps to the nearest existing parent folder or another drive (C: first).
 
 ## Running under WinPE (v0.19.6+)
 

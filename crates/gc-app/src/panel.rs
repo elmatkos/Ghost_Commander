@@ -87,6 +87,8 @@ pub struct Panel {
     ftp_work: Option<FtpWork>,
     /// The last connect attempt failed (keeps the Log button visible).
     ftp_failed: bool,
+    /// Set by the app from Config > Options: leave a vanished folder / drive for an existing one.
+    pub switch_on_missing: bool,
     select_next: Option<String>,
     ctx: egui::Context,
     pub action: Option<PanelAction>,
@@ -118,6 +120,7 @@ impl Panel {
             ftp: None,
             ftp_work: None,
             ftp_failed: false,
+            switch_on_missing: false,
             select_next: None,
             ctx,
             action: None,
@@ -146,7 +149,14 @@ impl Panel {
 
     /// Re-reads the folder if something was added, removed or renamed in it behind our back.
     pub fn refresh_if_changed(&mut self) {
-        if self.archive.is_none() && self.ftp.is_none() && self.loading.is_none() && self.folder_stamp() != self.stamp {
+        let on_disk = self.archive.is_none() && self.ftp.is_none() && self.loading.is_none();
+        if on_disk && self.switch_on_missing && !self.cwd.exists() {
+            if let Some(near) = nearest_existing(&self.cwd) {
+                self.go_to(near, None);
+                return;
+            }
+        }
+        if on_disk && self.folder_stamp() != self.stamp {
             self.reload();
         }
     }
@@ -1143,5 +1153,28 @@ mod tests {
         assert_eq!(fmt_size(1023), "1023 B");
         assert_eq!(fmt_size(1536), "1.5 KB");
         assert_eq!(fmt_size(5 * 1024 * 1024 * 1024), "5.0 GB");
+    }
+}
+
+/// The closest folder that still exists: the nearest existing parent of `path`, or, when its whole
+/// drive is gone, the root of another drive (C: first).
+fn nearest_existing(path: &Path) -> Option<PathBuf> {
+    if let Some(p) = path.ancestors().skip(1).find(|a| a.exists()) {
+        return Some(p.to_path_buf());
+    }
+    let drives = std::iter::once('C').chain('A'..='Z').map(|c| PathBuf::from(format!("{c}:\\")));
+    drives.into_iter().find(|d| d.exists())
+}
+
+#[cfg(test)]
+mod missing_tests {
+    use super::*;
+
+    #[test]
+    fn nearest_existing_parent_or_a_drive() {
+        let tmp = std::env::temp_dir();
+        assert_eq!(nearest_existing(&tmp.join("gc_gone_a").join("b")), Some(tmp.clone()));
+        let drive = nearest_existing(Path::new(r"Q:\no\such\dir"));
+        assert!(drive.is_some_and(|d| d.exists()));
     }
 }
