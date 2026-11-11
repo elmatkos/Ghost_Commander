@@ -68,7 +68,7 @@ Branding lives in `assets/` (`icon.ico` is embedded into the exe by `crates/gc-a
 - Measure first: benchmark suite (`criterion`) before and after each optimization.
 
 **Release**
-- Sign the binary and installer once a code-signing certificate is obtained (signtool + timestamping, CI step).
+- Releases are signed (Certum certificate, signtool + RFC 3161 timestamp) and published as `ghost-commander-vX-windows-x64.zip` and `-winpe-x64.zip`. Still open: an installer and a CI signing step.
 
 ## Themes and file icons
 
