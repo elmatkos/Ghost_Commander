@@ -193,3 +193,46 @@ impl FtpWindow {
         connect
     }
 }
+
+/// Net > FTP connection log: every step, answer and error of all connections. It keeps filling
+/// while the window is closed and while a server is browsed.
+#[derive(Default)]
+pub struct FtpLogWindow {
+    pub open: bool,
+}
+
+impl FtpLogWindow {
+    pub fn show(&mut self, ctx: &egui::Context) {
+        if !self.open {
+            return;
+        }
+        let mut open = self.open;
+        let max_h = (ctx.screen_rect().height() - 90.0).max(200.0);
+        egui::Window::new("FTP connection log").open(&mut open).default_size([700.0, 320.0]).max_height(max_h).show(ctx, |ui| {
+            let lines = gc_ftp::log_lines();
+            ui.horizontal(|ui| {
+                if ui.button("Copy").clicked() {
+                    ctx.copy_text(lines.join("\n"));
+                }
+                if ui.button("Clear").clicked() {
+                    gc_ftp::clear_log();
+                }
+                ui.weak(format!("{} line(s); passwords are never logged", lines.len()));
+            });
+            ui.separator();
+            let error = ui.visuals().error_fg_color;
+            egui::ScrollArea::both().stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
+                for l in &lines {
+                    let bad = l.contains("FAILED") || l.contains(" failed") || l.contains("Hint:");
+                    let mut text = egui::RichText::new(l.as_str()).monospace();
+                    if bad {
+                        text = text.color(error);
+                    }
+                    ui.add(egui::Label::new(text).extend().selectable(true));
+                }
+            });
+        });
+        self.open = open;
+        ctx.request_repaint_after(std::time::Duration::from_millis(500));
+    }
+}

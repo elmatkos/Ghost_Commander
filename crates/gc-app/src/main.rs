@@ -25,7 +25,7 @@ use std::time::Duration;
 use eframe::egui::{self, Key};
 use gc_core::jobs::{self, Job, Op, Resolution};
 use about::About;
-use ftp_window::FtpWindow;
+use ftp_window::{FtpLogWindow, FtpWindow};
 use help_window::HelpWindow;
 use gc_archive::{ArchiveIndex, PackFormat};
 use panel::{FileUse, Panel, PanelAction, SortKey};
@@ -78,6 +78,7 @@ struct App {
     checksums: ChecksumsWindow,
     verify: VerifyWindow,
     ftp_win: FtpWindow,
+    ftp_log: FtpLogWindow,
     /// Folders last written to settings (to notice a change and save the new ones).
     saved_dirs: [PathBuf; 2],
     /// Drive list with free space, refreshed by a background thread (a dead network drive can block).
@@ -109,6 +110,7 @@ impl App {
             panels,
             saved_dirs: [left, right],
             ftp_win: FtpWindow::default(),
+            ftp_log: FtpLogWindow::default(),
             active: 0,
             dialog: None,
             jobs: Vec::new(),
@@ -466,6 +468,7 @@ impl App {
                     self.active = i;
                     self.extract_then_use(ctx, index, inner, mode);
                 }
+                Some(PanelAction::FtpLog) => self.ftp_log.open = true,
                 Some(PanelAction::FtpFile { conn, remote, mode }) => {
                     self.active = i;
                     self.ftp_then_use(ctx, conn, remote, mode);
@@ -921,6 +924,10 @@ impl App {
                         self.ftp_win.open();
                         ui.close_menu();
                     }
+                    if ui.button("FTP connection log...").clicked() {
+                        self.ftp_log.open = true;
+                        ui.close_menu();
+                    }
                     if ui.add_enabled(self.panels[self.active].is_ftp(), egui::Button::new("Disconnect active panel")).clicked() {
                         self.panels[self.active].leave_ftp();
                         ui.close_menu();
@@ -1005,6 +1012,7 @@ impl App {
             self.status = None;
             self.panels[self.active].connect_ftp(target);
         }
+        self.ftp_log.show(ctx);
         self.save_dirs_if_changed();
         self.viewer.show(ctx);
         if let Some(err) = self.images.show(ctx) {

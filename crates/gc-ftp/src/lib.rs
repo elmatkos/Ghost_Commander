@@ -2,7 +2,10 @@
 //! links), directory listing, recursive download / upload / delete as background-job work, and
 //! saved sessions (see [`sessions`]).
 
+pub mod connlog;
 pub mod sessions;
+
+pub use connlog::{clear as clear_log, lines as log_lines, len as log_len};
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
@@ -16,9 +19,11 @@ use std::time::{Duration, Instant, SystemTime};
 use gc_core::jobs::{Progress, Resolution};
 use gc_core::Entry;
 use suppaftp::list::File as ListFile;
-use suppaftp::native_tls::TlsConnector;
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
 use suppaftp::types::FileType;
-use suppaftp::{FtpError, NativeTlsConnector, NativeTlsFtpStream};
+use suppaftp::{FtpError, RustlsConnector, RustlsFtpStream};
 
 const BUF_SIZE: usize = 256 * 1024;
 /// An idle control connection is probed with NOOP before use after this long.
@@ -144,7 +149,7 @@ pub fn remote_str(p: &Path) -> String {
 
 /// One control connection, shared between the panel and the background jobs.
 pub struct Conn {
-    ftp: Option<NativeTlsFtpStream>,
+    ftp: Option<RustlsFtpStream>,
     pub target: Target,
     last_used: Instant,
 }
@@ -163,7 +168,7 @@ impl Conn {
     }
 
     /// The live stream: probes a long-idle connection and reconnects when the server dropped it.
-    fn ftp(&mut self) -> io::Result<&mut NativeTlsFtpStream> {
+    fn ftp(&mut self) -> io::Result<&mut RustlsFtpStream> {
         let stale = self.last_used.elapsed() > IDLE_PROBE;
         let healthy = match self.ftp.as_mut() {
             Some(f) if stale => f.noop().is_ok(),
@@ -171,6 +176,7 @@ impl Conn {
             None => false,
         };
         if !healthy {
+            connlog::log("Connection lost or closed by the server, reconnecting ...");
             self.ftp = None;
             self.ftp = Some(open(&self.target)?);
         }
@@ -185,7 +191,8 @@ impl Conn {
 
     pub fn quit(&mut self) {
         if let Some(mut f) = self.ftp.take() {
-            let _ = f.quit();
+            let r = f.quit();
+            connlog::log(format!("Disconnected from {}{}", self.target.host, r.err().map(|e| format!(" (QUIT: {e})")).unwrap_or_default()));
         }
     }
 
@@ -193,13 +200,17 @@ impl Conn {
     pub fn list(&mut self, dir: &str) -> io::Result<Vec<Entry>> {
         let ftp = self.ftp()?;
         let mut files: Vec<ListFile> = Vec::new();
+        let mut how = "MLSD";
         match ftp.mlsd(Some(dir)) {
             Ok(lines) => files.extend(lines.iter().filter_map(|l| ListFile::from_mlsx_line(l).ok())),
-            Err(_) => {
-                let lines = ftp.list(Some(dir)).map_err(err)?;
+            Err(e) => {
+                connlog::log(format!("MLSD {dir} not usable ({e}), trying LIST"));
+                how = "LIST";
+                let lines = ftp.list(Some(dir)).map_err(|e| step_err(&format!("LIST {dir}"), e))?;
                 files.extend(lines.iter().filter_map(|l| ListFile::try_from(l.as_str()).ok()));
             }
         }
+        connlog::log(format!("{how} {dir}: {} entries", files.iter().filter(|f| f.name() != "." && f.name() != "..").count()));
         Ok(files
             .into_iter()
             .filter(|f| f.name() != "." && f.name() != "..")
@@ -214,37 +225,139 @@ impl Conn {
     }
 
     pub fn mkdir(&mut self, path: &str) -> io::Result<()> {
-        self.ftp()?.mkdir(path).map_err(err)
+        let r = self.ftp()?.mkdir(path).map_err(|e| step_err(&format!("MKD {path}"), e));
+        if r.is_ok() {
+            connlog::log(format!("MKD {path}: created"));
+        }
+        r
     }
 
     /// Deletes a file, or a folder with everything in it.
     pub fn remove(&mut self, path: &str, is_dir: bool) -> io::Result<()> {
         if !is_dir {
-            return self.ftp()?.rm(path).map_err(err);
+            self.ftp()?.rm(path).map_err(|e| step_err(&format!("DELE {path}"), e))?;
+            connlog::log(format!("DELE {path}: deleted"));
+            return Ok(());
         }
         for e in self.list(path)? {
             self.remove(&remote_str(&e.path), e.is_dir)?;
         }
-        self.ftp()?.rmdir(path).map_err(err)
+        self.ftp()?.rmdir(path).map_err(|e| step_err(&format!("RMD {path}"), e))?;
+        connlog::log(format!("RMD {path}: removed"));
+        Ok(())
     }
 }
 
-fn open(t: &Target) -> io::Result<NativeTlsFtpStream> {
-    let addr = (t.host.as_str(), t.port)
-        .to_socket_addrs()?
-        .next()
-        .ok_or_else(|| io::Error::other(format!("Cannot resolve {}", t.host)))?;
-    let mut ftp = NativeTlsFtpStream::connect_timeout(addr, Duration::from_secs(15)).map_err(err)?;
-    if t.secure {
-        let mut builder = TlsConnector::builder();
-        if t.insecure_tls {
-            builder.danger_accept_invalid_certs(true).danger_accept_invalid_hostnames(true);
+/// TLS settings: roots from the Windows certificate store, or no certificate checks at all.
+fn tls_config(insecure: bool) -> Result<Arc<ClientConfig>, String> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let builder = ClientConfig::builder_with_provider(provider.clone()).with_safe_default_protocol_versions().map_err(|e| e.to_string())?;
+    let config = if insecure {
+        builder.dangerous().with_custom_certificate_verifier(Arc::new(NoVerify(provider))).with_no_client_auth()
+    } else {
+        let loaded = rustls_native_certs::load_native_certs();
+        for e in &loaded.errors {
+            connlog::log(format!("Windows certificate store: {e}"));
         }
-        let connector = builder.build().map_err(|e| io::Error::other(e.to_string()))?;
-        ftp = ftp.into_secure(NativeTlsConnector::from(connector), &t.host).map_err(err)?;
+        let mut roots = RootCertStore::empty();
+        let (added, ignored) = roots.add_parsable_certificates(loaded.certs);
+        connlog::log(format!("Trusted root certificates from Windows: {added} ({ignored} unusable)"));
+        builder.with_root_certificates(roots).with_no_client_auth()
+    };
+    Ok(Arc::new(config))
+}
+
+/// Accepts any server certificate ("Accept self-signed" option); signatures are still checked.
+#[derive(Debug)]
+struct NoVerify(Arc<rustls::crypto::CryptoProvider>);
+
+impl ServerCertVerifier for NoVerify {
+    fn verify_server_cert(&self, _end: &CertificateDer<'_>, _inter: &[CertificateDer<'_>], _name: &ServerName<'_>, _ocsp: &[u8], _now: UnixTime) -> Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
     }
-    ftp.login(&t.user, &t.password).map_err(err)?;
-    ftp.transfer_type(FileType::Binary).map_err(err)?;
+
+    fn verify_tls12_signature(&self, message: &[u8], cert: &CertificateDer<'_>, dss: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+    }
+
+    fn verify_tls13_signature(&self, message: &[u8], cert: &CertificateDer<'_>, dss: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.0.signature_verification_algorithms.supported_schemes()
+    }
+}
+
+fn open(t: &Target) -> io::Result<RustlsFtpStream> {
+    connlog::log(format!("--- Connecting to {}:{} as \"{}\" ({})", t.host, t.port, t.user, if t.secure { "FTPS, explicit TLS" } else { "plain FTP, not encrypted" }));
+    let result = open_steps(t);
+    match &result {
+        Ok(_) => connlog::log("Connected."),
+        Err(e) => connlog::log(format!("CONNECT FAILED: {e}")),
+    }
+    result
+}
+
+/// A failed step: logged with the step name and the full error, returned as an `io::Error`.
+fn step_err(step: &str, e: FtpError) -> io::Error {
+    connlog::log(format!("{step} failed: {e}  [{e:?}]"));
+    err(e)
+}
+
+fn open_steps(t: &Target) -> io::Result<RustlsFtpStream> {
+    let addrs: Vec<_> = (t.host.as_str(), t.port).to_socket_addrs().map_err(|e| {
+        connlog::log(format!("Cannot resolve {}: {e}", t.host));
+        e
+    })?.collect();
+    let list: Vec<String> = addrs.iter().map(|a| a.to_string()).collect();
+    connlog::log(format!("Resolved {} to {}", t.host, list.join(", ")));
+    let mut last = None;
+    let mut connected = None;
+    for addr in &addrs {
+        match RustlsFtpStream::connect_timeout(*addr, Duration::from_secs(15)) {
+            Ok(f) => {
+                connected = Some(f);
+                connlog::log(format!("TCP connected to {addr}"));
+                break;
+            }
+            Err(e) => {
+                connlog::log(format!("TCP connect to {addr} failed: {e}"));
+                last = Some(e);
+            }
+        }
+    }
+    let mut ftp = match connected {
+        Some(f) => f,
+        None => return Err(last.map_or_else(|| io::Error::other(format!("Cannot resolve {}", t.host)), err)),
+    };
+    // A server that stops answering must not hang the worker forever.
+    let _ = ftp.get_ref().set_read_timeout(Some(Duration::from_secs(30)));
+    let _ = ftp.get_ref().set_write_timeout(Some(Duration::from_secs(30)));
+    if let Some(banner) = ftp.get_welcome_msg() {
+        connlog::log(format!("Server: {}", banner.trim()));
+    }
+    if t.secure {
+        connlog::log("Sending AUTH TLS and starting the TLS handshake ...");
+        if t.insecure_tls {
+            connlog::log("Certificate checks are OFF (accept self-signed / mismatching certificate).");
+        }
+        let config = tls_config(t.insecure_tls).map_err(|e| {
+            connlog::log(format!("Cannot create the TLS configuration: {e}"));
+            io::Error::other(e)
+        })?;
+        // One config for the control and every data connection: the data connection resumes the
+        // control connection's TLS session, which many servers (FileZilla, vsftpd) require.
+        ftp = ftp.into_secure(RustlsConnector::from(config), &t.host).map_err(|e| {
+            let hint = if t.insecure_tls { "" } else { "\n  Hint: a self-signed or mismatching certificate fails here; tick \"Accept self-signed / mismatching certificate\" in the session if you trust the server." };
+            connlog::log(format!("TLS / AUTH TLS failed: {e}  [{e:?}]{hint}"));
+            err(e)
+        })?;
+        connlog::log("TLS handshake OK, data channel protection set (PBSZ 0, PROT P).");
+    }
+    ftp.login(&t.user, &t.password).map_err(|e| step_err("Login", e))?;
+    connlog::log(format!("Logged in as \"{}\".", t.user));
+    ftp.transfer_type(FileType::Binary).map_err(|e| step_err("TYPE I", e))?;
     Ok(ftp)
 }
 
@@ -358,7 +471,8 @@ fn get_file(conn: &SharedConn, remote: &str, local: &Path, size: u64, p: &Progre
     };
     let mut c = lock(conn);
     let ftp = c.ftp()?;
-    let mut stream = ftp.retr_as_stream(remote).map_err(err)?;
+    connlog::log(format!("RETR {remote} ({size} bytes) -> {}", target.display()));
+    let mut stream = ftp.retr_as_stream(remote).map_err(|e| step_err(&format!("RETR {remote}"), e))?;
     let mut out = File::create(&target)?;
     let mut buf = vec![0u8; BUF_SIZE];
     loop {
@@ -378,7 +492,8 @@ fn get_file(conn: &SharedConn, remote: &str, local: &Path, size: u64, p: &Progre
         p.done.fetch_add(n as u64, Ordering::Relaxed);
     }
     out.flush()?;
-    ftp.finalize_retr_stream(stream).map_err(err)?;
+    ftp.finalize_retr_stream(stream).map_err(|e| step_err(&format!("RETR {remote} (end)"), e))?;
+    connlog::log(format!("RETR {remote}: done"));
     Ok(true)
 }
 
@@ -485,7 +600,8 @@ fn put_file(conn: &SharedConn, local: &Path, remote: &str, size: u64, known: &mu
     let mut input = File::open(local)?;
     let mut c = lock(conn);
     let ftp = c.ftp()?;
-    let mut stream = ftp.put_with_stream(&remote).map_err(err)?;
+    connlog::log(format!("STOR {remote} ({size} bytes) <- {}", local.display()));
+    let mut stream = ftp.put_with_stream(&remote).map_err(|e| step_err(&format!("STOR {remote}"), e))?;
     let mut buf = vec![0u8; BUF_SIZE];
     loop {
         if p.cancelled() {
@@ -503,7 +619,8 @@ fn put_file(conn: &SharedConn, local: &Path, remote: &str, size: u64, known: &mu
         stream.write_all(&buf[..n])?;
         p.done.fetch_add(n as u64, Ordering::Relaxed);
     }
-    ftp.finalize_put_stream(stream).map_err(err)?;
+    ftp.finalize_put_stream(stream).map_err(|e| step_err(&format!("STOR {remote} (end)"), e))?;
+    connlog::log(format!("STOR {remote}: done"));
     Ok(true)
 }
 

@@ -7,8 +7,11 @@ license.workspace = true
 
 [dependencies]
 gc-core = { path = "../gc-core" }
-suppaftp = { version = "6", default-features = false, features = ["native-tls"] }
+suppaftp = { version = "6", default-features = false, features = ["rustls"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8"
 serde = { version = "1", features = ["derive"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 toml = "0.8"
 
 [target.'cfg(windows)'.dependencies]

@@ -66,6 +66,8 @@ pub enum PanelAction {
     Open(PathBuf),
     /// A file inside an archive: extract it to the scratch folder, then use it.
     ArchiveFile { index: Arc<ArchiveIndex>, inner: String, mode: FileUse },
+    /// Open the FTP connection log (button, or after a failed connect).
+    FtpLog,
     /// A file on an FTP server: download it to the scratch folder, then use it.
     FtpFile { conn: SharedConn, remote: String, mode: FileUse },
     /// Context menu of an archive item: extract the selection to the other panel.
@@ -81,6 +83,8 @@ pub struct Panel {
     loading: Option<Loading>,
     ftp: Option<FtpView>,
     ftp_work: Option<FtpWork>,
+    /// The last connect attempt failed (keeps the Log button visible).
+    ftp_failed: bool,
     select_next: Option<String>,
     ctx: egui::Context,
     pub action: Option<PanelAction>,
@@ -111,6 +115,7 @@ impl Panel {
             loading: None,
             ftp: None,
             ftp_work: None,
+            ftp_failed: false,
             select_next: None,
             ctx,
             action: None,
@@ -183,9 +188,11 @@ impl Panel {
             self.listing.iter().filter(|e| needle.is_empty() || e.name.to_lowercase().contains(&needle)).cloned().collect()
         };
         if self.ftp.is_some() {
-            // On a server there is always a way up: the parent folder, or out of the server at its root.
-            let parent = gc_ftp::parent(&gc_ftp::remote_str(&self.cwd)).unwrap_or_else(|| "/".into());
-            entries.insert(0, Entry { name: PARENT.into(), path: PathBuf::from(parent), is_dir: true, size: 0, modified: None });
+            // A way up inside the server; the root has none (Disconnect leaves the server, so one never
+            // ends up on a local drive by accident).
+            if let Some(parent) = gc_ftp::parent(&gc_ftp::remote_str(&self.cwd)) {
+                entries.insert(0, Entry { name: PARENT.into(), path: PathBuf::from(parent), is_dir: true, size: 0, modified: None });
+            }
         } else if let (Some(parent), None) = (self.cwd.parent(), &self.error) {
             // Inside an archive there is always a way up (to the folder holding it).
             entries.insert(0, Entry { name: PARENT.into(), path: parent.to_path_buf(), is_dir: true, size: 0, modified: None });
@@ -365,7 +372,7 @@ impl Panel {
                     let came_from = here.trim_end_matches('/').rsplit('/').next().map(str::to_owned);
                     self.ftp_list(parent, came_from);
                 }
-                None => self.leave_ftp(),
+                None => {} // at the root of the server: stay (Disconnect leaves)
             }
             return;
         }
@@ -503,6 +510,7 @@ impl Panel {
         self.loading = None;
         self.ftp_work = Some(FtpWork { rx, label, select: None });
         self.error = None;
+        self.ftp_failed = false;
     }
 
     /// Reads remote folder `path` on a worker thread and shows it when it arrives.
@@ -561,7 +569,14 @@ impl Panel {
                 self.show_remote(path, entries, w.select);
             }
             Ok(FtpReply::Listed { path, entries }) => self.show_remote(path, entries, w.select),
-            Err(e) => self.error = Some(format!("{}: {e}", w.label)),
+            Err(e) => {
+                self.error = Some(format!("{}: {e}", w.label));
+                if self.ftp.is_none() {
+                    // A connect that failed: show what happened.
+                    self.ftp_failed = true;
+                    self.action = Some(PanelAction::FtpLog);
+                }
+            }
         }
     }
 
@@ -735,6 +750,14 @@ impl Panel {
         ui.horizontal(|ui| {
             if ui.small_button("..").clicked() {
                 self.go_up();
+                clicked = true;
+            }
+            if self.ftp.is_some() && ui.small_button("Disconnect").on_hover_text("Close the connection and show the local folder again").clicked() {
+                self.leave_ftp();
+                clicked = true;
+            }
+            if (self.ftp.is_some() || self.ftp_work.is_some() || self.ftp_failed) && ui.small_button("Log").on_hover_text("FTP connection log").clicked() {
+                self.action = Some(PanelAction::FtpLog);
                 clicked = true;
             }
             if let Some(l) = &self.loading {

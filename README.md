@@ -2,7 +2,7 @@
 
 A fast, modern, dual-pane file manager written in Rust. It follows the Norton / Total / Midnight Commander tradition and aims to keep every feature of those three while improving on them.
 
-**Status:** v0.20.2, Windows (x64), actively developed. Also runs under WinPE.
+**Status:** v0.20.3, Windows (x64), actively developed. Also runs under WinPE.
 
 **Repo:** https://github.com/elmatkos/Ghost_Commander
 
@@ -22,7 +22,7 @@ A fast, modern, dual-pane file manager written in Rust. It follows the Norton / 
 | Archives | `sevenz-rust2`, `zip`, `tar`, `flate2`, `lzma-rust2`, `unrar` (read only) |
 | Images | `image` (png, jpeg, gif, bmp, webp, ico) |
 | Hashes | `crc32fast`, `md-5`, `sha1`, `sha2` |
-| FTP / FTPS | `suppaftp` (native TLS via Windows Schannel), passwords saved with Windows DPAPI |
+| FTP / FTPS | `suppaftp` + `rustls` (certificates checked against the Windows store), passwords saved with Windows DPAPI |
 | Windows | `windows` / `windows-sys` (shell menu, `CopyFileExW`, SMBIOS, drives) |
 
 ## Structure
@@ -132,7 +132,9 @@ Net > FTP connect (Ctrl+N) opens the connection window. Paste a link such as `ft
 
 "Save as session" (or New in the list) keeps a server under a name: host, port, user, password, start folder, FTPS and "accept self-signed certificate". Sessions live in `%APPDATA%\Ghost Commander\ftp_sessions.toml`; passwords are encrypted with Windows DPAPI, so the file works only for your Windows account on that PC (where DPAPI is missing, e.g. WinPE, passwords are not saved).
 
-A server panel behaves like a folder: Enter / Backspace browse (Backspace at the server's root disconnects), F5 downloads into the other panel's folder, and F5 in a local panel uploads into a server shown in the other panel (F6 moves, deleting the source only after everything arrived; folders are copied recursively, name conflicts open the usual overwrite / skip / rename dialog). F7 makes a folder and F8 deletes on the server (the cursor lands on a new folder). F3 / Enter on a file downloads it to a scratch folder and views / opens it; F4 opens a local copy (it is not uploaded back). Listing and transfers run on worker threads, a dropped connection is reopened on next use, and Cancel aborts a transfer. Drive buttons and Alt+F1 / Alt+F2 leave the server.
+A server panel behaves like a folder: Enter / Backspace browse (the root of the server has no `..` and Backspace stays there; the panel header has a **Disconnect** button, also in the Net menu, and the drive buttons / Alt+F1 / Alt+F2 leave the server too), F5 downloads into the other panel's folder, and F5 in a local panel uploads into a server shown in the other panel (F6 moves, deleting the source only after everything arrived; folders are copied recursively, name conflicts open the usual overwrite / skip / rename dialog). F7 makes a folder and F8 deletes on the server (the cursor lands on a new folder). F3 / Enter on a file downloads it to a scratch folder and views / opens it; F4 opens a local copy (it is not uploaded back). Listing and transfers run on worker threads, a dropped connection is reopened on next use, and Cancel aborts a transfer. Drive buttons and Alt+F1 / Alt+F2 leave the server.
+
+The **Log** button in the header of a server panel (and Net > FTP connection log) shows every step of every connection: name lookup, TCP, server banner, TLS handshake, login, each folder read, transfers and all errors with the full server answer. It opens by itself when a connect fails, keeps filling while you browse, and has Copy and Clear. Passwords are never written to it. FTPS uses one TLS session for the control and the data connections (many servers, e.g. FileZilla Server and vsftpd with `require_ssl_reuse`, insist on that); for a self-signed server certificate tick "Accept self-signed / mismatching certificate" in the session.
 
 Live round trip test against a server: `GC_FTP_TEST_URL=ftp://user:pass@127.0.0.1:2121/ cargo test -p gc-ftp --test live`.
 

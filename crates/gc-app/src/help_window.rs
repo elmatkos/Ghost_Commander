@@ -40,7 +40,8 @@ const GROUPS: [(&str, &[(&str, &str)]); 7] = [
     (
         "FTP / FTPS (Net menu, Ctrl+N)",
         &[
-            ("Enter / Backspace", "Open a folder / go up; Backspace at the root of the server disconnects"),
+            ("Enter / Backspace", "Open a folder / go up (stays at the root of the server; Disconnect button or Net menu leaves it)"),
+            ("Log button, Net menu", "Connection log: every step, answer and error (also shown after a failed connect)"),
             ("F5 / F6", "Download to the other panel, or upload from here when the other panel is a server (F6 deletes the source afterwards)"),
             ("F3 / Enter on a file", "Download to a scratch folder and view / open it"),
             ("F4", "Edit a local copy (not uploaded back)"),
