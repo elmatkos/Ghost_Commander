@@ -4,7 +4,7 @@ A fast, modern, dual-pane file manager written in Rust. It follows the Norton / 
 
 **Status:** Planning (design proposal, nothing built yet).
 
-**Repo:** https://github.com/elmatkos/Ghost_Commander (private for now, to be made public later).
+**Repo:** https://github.com/elmatkos/Ghost_Commander
 
 ## Goals
 
@@ -143,3 +143,9 @@ The same exe runs in WinPE; only the package differs (`ghost-commander-vX-winpe-
 - The theme is pinned to egui's dark/light mode, otherwise WinPE's system theme overrode the chosen one on the first frame.
 - `gc.log` next to the exe records startup steps, the OpenGL renderer, panics, crashes and UI stalls longer than 5 s.
 - Tested on Lenovo L13 G3 AMD and L16 G2 Intel, WinPE 10.0.26100 booted from SCCM.
+
+## License
+
+Dual-licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
+
+Third-party notes: RAR reading uses the `unrar` crate, which builds Rome's UnRAR source under its own license (it may not be used to re-create the RAR compression algorithm). The WinPE build bundles Mesa llvmpipe (MIT).

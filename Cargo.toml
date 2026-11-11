@@ -5,6 +5,8 @@ members = ["crates/gc-core", "crates/gc-archive", "crates/gc-sysinfo", "crates/g
 [workspace.package]
 version = "0.19.6"
 authors = ["Martin Balaj"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/elmatkos/Ghost_Commander"
 edition = "2021"
 
 [profile.release]
