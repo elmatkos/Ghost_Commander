@@ -38,13 +38,13 @@ impl Options {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 changed |= ui.radio_value(&mut self.switch_on_missing_drive, false, "Keep showing it, reload when it is back").changed();
-                ui.label("\u{24D8}").on_hover_text(
+                info_icon(ui).on_hover_text(
                     "A panel shows a drive that is removed (USB stick, network share, ...).\n\nKeep: the panel stays on that path and shows an error. Plug the drive in again and the folder loads by itself.",
                 );
             });
             ui.horizontal(|ui| {
                 changed |= ui.radio_value(&mut self.switch_on_missing_drive, true, "Switch to the nearest existing folder or drive").changed();
-                ui.label("\u{24D8}").on_hover_text(
+                info_icon(ui).on_hover_text(
                     "Switch: the panel jumps to the closest parent folder that still exists, or to another drive (C: first) when the whole drive is gone.\n\nThe removed path is not remembered, so it is not reopened when the drive returns.",
                 );
             });
@@ -61,4 +61,14 @@ impl Options {
         }
         self.open = open && !ctx.input(|i| i.key_pressed(Key::Escape));
     }
+}
+
+/// A small circled "i" drawn by hand (the font has no such glyph); hover it for the help text.
+fn info_icon(ui: &mut egui::Ui) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
+    let color = if resp.hovered() { ui.visuals().strong_text_color() } else { ui.visuals().weak_text_color() };
+    let painter = ui.painter();
+    painter.circle_stroke(rect.center(), 7.0, egui::Stroke::new(1.3, color));
+    painter.text(rect.center(), egui::Align2::CENTER_CENTER, "i", egui::FontId::proportional(11.0), color);
+    resp
 }
