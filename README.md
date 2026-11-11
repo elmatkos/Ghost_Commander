@@ -2,67 +2,58 @@
 
 A fast, modern, dual-pane file manager written in Rust. It follows the Norton / Total / Midnight Commander tradition and aims to keep every feature of those three while improving on them.
 
-**Status:** Planning (design proposal, nothing built yet).
+**Status:** v0.19.6, Windows (x64), actively developed. Also runs under WinPE.
 
 **Repo:** https://github.com/elmatkos/Ghost_Commander
 
 ## Goals
 
 - Speed first: instant directory listing, no UI stalls, all I/O off the UI thread.
-- Native archive support (7z, zip, tar, rar read, ...) treated as folders, no external 7-Zip needed.
+- Native archive support (7z, zip, tar, rar read) treated as folders, no external 7-Zip needed.
 - Built-in image viewer: opens the full image at native size if it fits the monitor, otherwise scales proportionally to 75% of the monitor *height* (wide-monitor friendly).
 - Modern look (dark/light themes, crisp fonts, icons) without losing keyboard-first workflow.
 
-## Proposed stack (to be approved)
+## Stack
 
-| Area | Choice | Why |
-|---|---|---|
-| Language | Rust (stable) | Speed, safety |
-| UI | `egui`/`eframe` (wgpu) | Pure Rust, fast to iterate, GPU rendered; alternative: Slint |
-| Archives | `sevenz-rust2`, `zip`, `tar`, `flate2`, `xz2`/`liblzma`, `unrar` (read) | Native, no 7z.exe |
-| Images | `image` + `webp`/`avif`/`zune-*`, `fast_image_resize` | Fast decode + SIMD resize |
-| Hashes | `crc32fast`, `blake3`, `sha2`, `md-5` | CRC32 is hardware accelerated |
-| Windows I/O | `windows-sys` (FindFirstFileEx, USN/MFT later) | Fastest listing, shell integration |
+| Area | Choice |
+|---|---|
+| Language | Rust (stable) |
+| UI | `egui`/`eframe` (OpenGL), `egui-phosphor` icons |
+| Archives | `sevenz-rust2`, `zip`, `tar`, `flate2`, `lzma-rust2`, `unrar` (read only) |
+| Images | `image` (png, jpeg, gif, bmp, webp, ico) |
+| Hashes | `crc32fast`, `md-5`, `sha1`, `sha2` |
+| Windows | `windows` / `windows-sys` (shell menu, `CopyFileExW`, SMBIOS, drives) |
 
-## Planned structure
+## Structure
 
 ```
 Ghost_Commander/
   Cargo.toml            (workspace)
   crates/
-    gc-core/            VFS trait, file ops, queue, hashing, search
-    gc-archive/         archive providers (7z, zip, tar, ...) as VFS
-    gc-image/           decode + fit logic for the viewer
-    gc-ui/              egui app, panels, viewer, themes
-    gc-app/             binary
+    gc-core/            file ops, background jobs, hashing, file types, Windows fs
+    gc-archive/         archive providers (7z, zip, tar, rar read) browsed as folders
+    gc-sysinfo/         system information (SMBIOS, CPU, TPM, drives, ...)
+    gc-app/             egui app: panels, viewers, themes, dialogs (binary ghost-commander)
 ```
 
 ## Roadmap
 
-1. **M0** Skeleton: workspace, window, one panel listing a directory.
-2. **M1** Dual panes, keyboard navigation, F5/F6/F7/F8 copy/move/mkdir/delete, background job queue with progress.
-3. **M2** Virtual file system layer + archives browsed as folders, extract/pack (7z first).
-4. **M3** Image viewer (fit rules above), text/hex viewer (F3), editor hand-off (F4).
-5. **M4** CRC/hash verify (.sfv/.md5/.sha256), file compare, sync dirs, multi-rename, search (incl. in archives).
-6. **M5** Tabs, bookmarks, themes, plugins/commands config, FTP/SFTP VFS.
+Done: dual panes, file operations with job queue, archives as folders (extract/pack), text and image viewers, checksums and verify, themes, System Info, fast copy, WinPE support.
+
+Planned: file compare, sync dirs, multi-rename, search (incl. in archives), tabs, bookmarks, plugins/commands config, FTP/SFTP.
 
 ## How to run
 
-TBD (no code yet). Will be `cargo run --release`.
+`cargo run --release` (binary `ghost-commander`). Tests: `cargo test`.
 
 ## Current state
 
-M0 and M1 are built: dual panes, keyboard navigation (arrows, PgUp/PgDn, Home/End, Tab, Enter, Backspace, Space/Insert to mark), F5 copy, F6 move, F7 new folder, F8 delete to the recycle bin (Shift+F8 permanent), Ctrl+1/Ctrl+2 drive picker, date column. All file operations are cancellable background jobs with progress. Name conflicts open a dialog (overwrite / skip / rename / cancel, optionally for all remaining).
-
-Run: `cargo run --release` (binary `ghost-commander`). Test: `cargo test`.
+Dual panes, keyboard navigation (arrows, PgUp/PgDn, Home/End, Tab, Enter, Backspace, Space/Insert to mark), F5 copy, F6 move, F7 new folder, F8 delete to the recycle bin (Shift+F8 permanent), Ctrl+1/Ctrl+2 drive picker, date column. All file operations are cancellable background jobs with progress. Name conflicts open a dialog (overwrite / skip / rename / cancel, optionally for all remaining).
 
 Branding lives in `assets/` (`icon.ico` is embedded into the exe by `crates/gc-app/build.rs`, `logo_512.png` is shown in the About window, Help > About).
 
 ## TODO (backlog)
 - Verify v0.19.0 copy: measure parallel file counts (1/2/4/8/16), test copies between C: D: F: G:, check how parallel copying looks in the GUI.
-
-**M1 gaps**
-- Sortable columns (name, size, date), quick filter.
 
 **Performance: caching and acceleration everywhere possible**
 - Cache directory listings (keyed by path + change notification via `ReadDirectoryChangesW`), incremental refresh instead of full re-read.
@@ -71,9 +62,6 @@ Branding lives in `assets/` (`icon.ico` is embedded into the exe by `crates/gc-a
 - Use modern CPU features wherever it pays off, with runtime detection and scalar fallback: AVX2/AVX-512 for search and compare, SHA-NI and PCLMULQDQ/CRC32 instructions for hashing, AES-NI, SIMD image resize/decode, BMI2. Applies to core and to every later feature (archives, hashing, compare, search).
 - Parallelism: rayon for hashing, search, directory sizing; large-file copy with unbuffered/overlapped I/O; NTFS MFT/USN fast search.
 - Measure first: benchmark suite (`criterion`) before and after each optimization.
-
-**System info (like EFI Commander)**
-- Built-in system information view: CPU (brand, features, caches), memory, SMBIOS tables, disks, firmware/Secure Boot state, displays.
 
 **Release**
 - Sign the binary and installer once a code-signing certificate is obtained (signtool + timestamping, CI step).
@@ -104,7 +92,7 @@ mkv = "video"
 
 ## Archives
 
-Enter on any other file opens it with its Windows default program (pictures in the photo app, `.exe` runs, ...); Enter on a `.zip`, `.7z`, `.rar` (read only), `.tar`, `.tar.gz` (`.tgz`) or `.tar.xz` (`.txz`) opens it as a folder (browse, `..` leaves it); F5 extracts the marked items (or the one under the cursor) into the other panel's folder, with the same progress, cancel and conflict dialog as file copies. Names that could escape the destination (`..`, drive letters) are never listed or extracted. Archives inside archives open too: the inner file is extracted to a scratch folder in the background (header shows a spinner) and removed on exit. Archives open off the UI thread, and zip extraction runs on all cores. Alt+F5 packs the marked items (or the one under the cursor), with an editable target folder and name, into a new `.7z`, `.zip`, `.tar.gz` or `.tar.xz` (xz compresses on all cores) in the other panel's folder (never overwrites; adding to an existing archive is not supported yet). Browsing archives stays read-only; Tarballs are streams, so listing a big `.tar.gz` or `.tar.xz` reads it completely once.
+Enter on any other file opens it with its Windows default program (pictures in the photo app, `.exe` runs, ...); Enter on a `.zip`, `.7z`, `.rar` (read only), `.tar`, `.tar.gz` (`.tgz`) or `.tar.xz` (`.txz`) opens it as a folder (browse, `..` leaves it); F5 extracts the marked items (or the one under the cursor) into the other panel's folder, with the same progress, cancel and conflict dialog as file copies. Names that could escape the destination (`..`, drive letters) are never listed or extracted. Archives inside archives open too: the inner file is extracted to a scratch folder in the background (header shows a spinner) and removed on exit. Archives open off the UI thread, and zip extraction runs on all cores. Alt+F5 packs the marked items (or the one under the cursor), with an editable target folder and name, into a new `.7z`, `.zip`, `.tar.gz` or `.tar.xz` (xz compresses on all cores) in the other panel's folder (never overwrites; adding to an existing archive is not supported yet). Browsing archives stays read-only. RAR archives are read through the UnRAR library (extraction only; no RAR creation exists, by licence). Tarballs are streams, so listing a big `.tar.gz` or `.tar.xz` reads it completely once.
 
 ## Context menu and Delete
 
@@ -120,7 +108,7 @@ Info > System Info (F9) shows a scrollable summary in the style of EFI Commander
 
 ## Sorting and quick filter
 
-Click a column heading (Name, Size, Date) to sort, click again to reverse; Ctrl+F3 sorts by name, Ctrl+F4 by extension, Ctrl+F5 by date, Ctrl+F6 by size. Folders always stay on top. Ctrl+F opens the quick filter under the list: typing narrows the panel to names containing the text (case-insensitive), Enter keeps the filtered list and gives the keyboard back, Esc clears it; entering another folder clears it too. RAR archives are read through the UnRAR library (extraction only; no RAR creation exists, by licence).
+Click a column heading (Name, Size, Date) to sort, click again to reverse; Ctrl+F3 sorts by name, Ctrl+F4 by extension, Ctrl+F5 by date, Ctrl+F6 by size. Folders always stay on top. Ctrl+F opens the quick filter under the list: typing narrows the panel to names containing the text (case-insensitive), Enter keeps the filtered list and gives the keyboard back, Esc clears it; entering another folder clears it too.
 
 Ctrl+H (or Tools > Checksums) calculates CRC-32, MD5, SHA-1 and SHA-256 of the marked files, or of the file under the cursor, in one read pass; several files are hashed in parallel. Paste a checksum into "Compare with" and the matching value lights up. Folders are skipped and files inside archives are not supported yet. "Save .crc" writes `name.ext.crc` next to each file, one SFV-style line `name.ext 1A2B3C4D`.
 
@@ -148,4 +136,4 @@ The same exe runs in WinPE; only the package differs (`ghost-commander-vX-winpe-
 
 Dual-licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
 
-Third-party notes: RAR reading uses the `unrar` crate, which builds Rome's UnRAR source under its own license (it may not be used to re-create the RAR compression algorithm). The WinPE build bundles Mesa llvmpipe (MIT).
+Third-party notes: RAR reading uses the `unrar` crate, which builds Rome's UnRAR source under its own license (it may not be used to re-create the RAR compression algorithm). The WinPE package (not stored in this repo) adds Mesa llvmpipe software OpenGL (MIT).
