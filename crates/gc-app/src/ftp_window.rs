@@ -26,6 +26,10 @@ impl FtpWindow {
         self.open = true;
         self.focus_url = true;
         self.message = None;
+        // Start with the scheme typed; the user completes or overwrites it.
+        if self.url.trim().is_empty() {
+            self.url = "ftp://".into();
+        }
     }
 
     fn save(&mut self) {
@@ -63,12 +67,25 @@ impl FtpWindow {
         let mut connect: Option<Target> = None;
         let mut save_url_session = false;
         let mut save_now = false;
-        egui::Window::new("FTP connect").open(&mut open).collapsible(false).default_width(560.0).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
-            ui.label("Link  (ftp://user:password@host:port/folder  -  ftps:// for TLS; special characters in the login as %40 for @, %3A for :)");
+        // Never taller than the app window, so the title bar stays reachable; the content scrolls.
+        let max_h = (ctx.screen_rect().height() - 90.0).max(200.0);
+        egui::Window::new("FTP connect").open(&mut open).collapsible(false).resizable([true, false]).default_width(560.0).max_height(max_h).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+            // Text fields get the outline that normally shows only under the cursor.
+            let outline = ui.visuals().widgets.hovered.bg_stroke;
+            ui.visuals_mut().widgets.inactive.bg_stroke = outline;
+            egui::ScrollArea::vertical().max_height(max_h - 50.0).auto_shrink([false, true]).show(ui, |ui| {
+            ui.label("Link:  ftp://user:password@host:port/folder   (ftps:// = TLS)");
+            ui.weak("Special characters in the login: %40 for @, %3A for :, %2F for /");
             ui.horizontal(|ui| {
-                let edit = ui.add(egui::TextEdit::singleline(&mut self.url).hint_text("ftp://mato:secret@lenovo-ts.com").desired_width(380.0));
+                let edit = ui.add(egui::TextEdit::singleline(&mut self.url).desired_width(380.0));
                 if std::mem::take(&mut self.focus_url) {
                     edit.request_focus();
+                    // Cursor after "ftp://" so typing continues the address.
+                    if let Some(mut state) = egui::TextEdit::load_state(ctx, edit.id) {
+                        let end = egui::text::CCursor::new(self.url.chars().count());
+                        state.cursor.set_char_range(Some(egui::text::CCursorRange::one(end)));
+                        state.store(ctx, edit.id);
+                    }
                 }
                 let enter = edit.lost_focus() && ctx.input(|i| i.key_pressed(Key::Enter));
                 if ui.button("Connect").clicked() || enter {
@@ -152,6 +169,7 @@ impl FtpWindow {
                 ui.colored_label(ui.visuals().error_fg_color, m);
             }
             ui.weak("Passwords are saved encrypted for your Windows account only. Esc closes.");
+            });
         });
         if save_now {
             self.save();
