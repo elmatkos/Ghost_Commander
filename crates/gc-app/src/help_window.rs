@@ -19,7 +19,13 @@ const GROUPS: [(&str, &[(&str, &str)]); 6] = [
         ],
     ),
     ("Shift", &[("Shift+F4", "Create a new empty file and edit it"), ("Shift+F8 / Shift+Del", "Delete permanently")]),
-    ("Alt", &[("Alt+F5", "Pack the selection into a new archive (7z, zip, tar.gz, tar.xz)")]),
+    (
+        "Alt",
+        &[
+            ("Alt+F1 / Alt+F2", "Pick a drive for the left / right panel"),
+            ("Alt+F5", "Pack the selection into a new archive (7z, zip, tar.gz, tar.xz)"),
+        ],
+    ),
     (
         "Ctrl",
         &[

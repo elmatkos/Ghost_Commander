@@ -342,8 +342,9 @@ impl App {
                 self.view_or_edit(ctx, true);
             }
         }
-        for (key, panel) in [(Key::Num1, 0), (Key::Num2, 1)] {
-            if ctrl && pressed(ctx, key) {
+        // Ctrl+1/2 and (as in Total Commander) Alt+F1/F2: drive picker for the left / right panel.
+        for (key, alt_key, panel) in [(Key::Num1, Key::F1, 0), (Key::Num2, Key::F2, 1)] {
+            if (ctrl && pressed(ctx, key)) || (alt && !ctrl && pressed(ctx, alt_key)) {
                 let list = gc_core::drives();
                 let sel = list.iter().position(|d| self.panels[panel].cwd.starts_with(d)).unwrap_or(0);
                 self.dialog = Some(Dialog::Drives { panel, list, sel });
@@ -566,9 +567,18 @@ impl App {
                 None => Err(std::io::Error::other("archives are read-only")),
             };
             match made {
-                Ok(_) => {
+                Ok(path) => {
                     self.status = None;
                     self.reload_all();
+                    // "a\b" creates nested folders: the cursor goes to the top one that shows in this panel.
+                    let panel = &mut self.panels[self.active];
+                    panel.select_path(&path);
+                    if let Some(top) = panel.disk_folder().and_then(|cwd| path.strip_prefix(cwd).ok()).and_then(|rel| rel.components().next()) {
+                        let top = panel.disk_folder().map(|cwd| cwd.join(top));
+                        if let Some(top) = top {
+                            panel.select_path(&top);
+                        }
+                    }
                 }
                 Err(e) => self.status = Some(format!("Create folder failed: {e}")),
             }
@@ -861,7 +871,7 @@ const HINTS: [(bool, bool, bool, &[Hint]); 4] = [
             ("Ctrl+F6", "Sort size"),
         ],
     ),
-    (false, false, true, &[("Alt+F5", "Pack")]),
+    (false, false, true, &[("Alt+F1", "Left drive"), ("Alt+F2", "Right drive"), ("Alt+F5", "Pack")]),
 ];
 
 /// Draws the hints for the held modifiers, as many as fit into the width of `ui`.
