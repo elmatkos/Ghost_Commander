@@ -2,7 +2,7 @@
 
 A fast, modern, dual-pane file manager written in Rust. It follows the Norton / Total / Midnight Commander tradition and aims to keep every feature of those three while improving on them.
 
-**Status:** v0.20.0, Windows (x64), actively developed. Also runs under WinPE.
+**Status:** v0.20.1, Windows (x64), actively developed. Also runs under WinPE.
 
 **Repo:** https://github.com/elmatkos/Ghost_Commander
 

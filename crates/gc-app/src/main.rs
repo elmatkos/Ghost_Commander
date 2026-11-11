@@ -391,10 +391,12 @@ impl App {
             self.active = 1 - self.active;
         }
         // Consume the key: the window it opens also closes on the same key and must not see this press.
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::F1)) {
+        // consume_key ignores extra modifiers, so Alt+F1 (drive picker) must be kept out by hand.
+        let plain = ctx.input(|i| !i.modifiers.alt && !i.modifiers.ctrl && !i.modifiers.shift);
+        if plain && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::F1)) {
             self.help.open = true;
         }
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::F9)) {
+        if plain && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::F9)) {
             self.sysinfo.start(ctx);
         }
         let shift = ctx.input(|i| i.modifiers.shift);
