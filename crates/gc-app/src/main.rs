@@ -4,6 +4,7 @@
 mod about;
 mod checksums_window;
 mod drive_bar;
+mod ftp_window;
 mod help_window;
 mod options;
 mod image_viewer;
@@ -24,6 +25,7 @@ use std::time::Duration;
 use eframe::egui::{self, Key};
 use gc_core::jobs::{self, Job, Op, Resolution};
 use about::About;
+use ftp_window::FtpWindow;
 use help_window::HelpWindow;
 use gc_archive::{ArchiveIndex, PackFormat};
 use panel::{FileUse, Panel, PanelAction, SortKey};
@@ -44,6 +46,12 @@ enum Dialog {
     Drives { panel: usize, list: Vec<PathBuf>, sel: usize },
     /// Extract inner paths of an archive into a folder.
     Extract { index: Arc<ArchiveIndex>, names: Vec<String>, dest: PathBuf },
+    /// F5 / F6 on a server panel: download `items` into the local folder `dest`.
+    FtpDownload { conn: gc_ftp::SharedConn, items: Vec<gc_ftp::RemoteItem>, dest: PathBuf, delete_source: bool },
+    /// F5 / F6 into a server panel: upload local `srcs` into the remote folder.
+    FtpUpload { conn: gc_ftp::SharedConn, srcs: Vec<PathBuf>, folder: String, delete_source: bool },
+    /// F8 on a server panel.
+    FtpDelete { conn: gc_ftp::SharedConn, items: Vec<gc_ftp::RemoteItem> },
     /// Pack items into a new archive `name.ext` in `dest_dir`.
     Pack { srcs: Vec<PathBuf>, dest_dir: String, name: String, format: PackFormat },
 }
@@ -69,6 +77,9 @@ struct App {
     sysinfo: SysInfoWindow,
     checksums: ChecksumsWindow,
     verify: VerifyWindow,
+    ftp_win: FtpWindow,
+    /// Folders last written to settings (to notice a change and save the new ones).
+    saved_dirs: [PathBuf; 2],
     /// Drive list with free space, refreshed by a background thread (a dead network drive can block).
     drives: Arc<std::sync::Mutex<Vec<gc_core::DriveInfo>>>,
     viewer: Viewer,
@@ -83,8 +94,21 @@ impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         install_icon_font(&cc.egui_ctx);
         let start = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        // Open the folders the panels showed last time (when they still exist).
+        let saved = theme::load_settings();
+        let remembered = |d: &Option<String>| d.as_ref().map(PathBuf::from).filter(|p| p.is_dir()).unwrap_or_else(|| start.clone());
+        let (left, right) = (remembered(&saved.left_dir), remembered(&saved.right_dir));
+        let mut panels = [Panel::new(left.clone(), cc.egui_ctx.clone()), Panel::new(right.clone(), cc.egui_ctx.clone())];
+        // `ghost-commander ftp://user:pass@host/dir` connects the left panel right away.
+        if let Some(link) = std::env::args().nth(1).filter(|a| a.to_ascii_lowercase().starts_with("ftp")) {
+            if let Ok(target) = gc_ftp::Target::from_url(&link) {
+                panels[0].connect_ftp(target);
+            }
+        }
         Self {
-            panels: [Panel::new(start.clone(), cc.egui_ctx.clone()), Panel::new(start, cc.egui_ctx.clone())],
+            panels,
+            saved_dirs: [left, right],
+            ftp_win: FtpWindow::default(),
             active: 0,
             dialog: None,
             jobs: Vec::new(),
@@ -109,6 +133,9 @@ impl App {
         let mode = if edit { FileUse::Edit } else { FileUse::View };
         if let Some((index, inner)) = self.panels[self.active].archive_file() {
             return self.extract_then_use(ctx, index, inner, mode);
+        }
+        if let Some((conn, remote)) = self.panels[self.active].ftp_file() {
+            return self.ftp_then_use(ctx, conn, remote, mode);
         }
         let Some(file) = self.panels[self.active].current_file() else {
             self.status = Some("Select a file first (folders cannot be viewed).".into());
@@ -154,6 +181,18 @@ impl App {
         self.extractions.push((rx, mode));
     }
 
+    /// File on an FTP server: download it to the scratch folder on a worker thread, then `use_file` it.
+    fn ftp_then_use(&mut self, ctx: &egui::Context, conn: gc_ftp::SharedConn, remote: String, mode: FileUse) {
+        self.status = Some(format!("Downloading {remote} ..."));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(gc_ftp::download_to_scratch(&conn, &remote));
+            ctx.request_repaint();
+        });
+        self.extractions.push((rx, mode));
+    }
+
     fn poll_extractions(&mut self, ctx: &egui::Context) {
         let mut finished = Vec::new();
         self.extractions.retain(|(rx, mode)| match rx.try_recv() {
@@ -166,9 +205,27 @@ impl App {
         });
         for (result, mode) in finished {
             match result {
-                Ok(file) => self.use_file(ctx, file.clone(), mode, vec![file]),
+                Ok(file) => {
+                    let from_server = file.starts_with(gc_ftp::scratch_dir());
+                    self.use_file(ctx, file.clone(), mode, vec![file]);
+                    if from_server && mode == FileUse::Edit {
+                        self.status = Some("Editing a local copy of the server file: changes are not uploaded (save it, then F5 into the server panel).".into());
+                    }
+                }
                 Err(e) => self.status = Some(format!("Extract failed: {e}")),
             }
+        }
+    }
+
+    /// Remembers the folders of both panels for the next start.
+    fn save_dirs_if_changed(&mut self) {
+        let dirs = [self.panels[0].restore_dir(), self.panels[1].restore_dir()];
+        if dirs != self.saved_dirs {
+            let mut s = theme::load_settings();
+            s.left_dir = Some(dirs[0].display().to_string());
+            s.right_dir = Some(dirs[1].display().to_string());
+            let _ = theme::save_settings(&s);
+            self.saved_dirs = dirs;
         }
     }
 
@@ -186,6 +243,22 @@ impl App {
         let other = 1 - self.active;
         let dest_dir = self.panels[other].disk_folder().map(Path::to_path_buf);
 
+        // A server panel: F5 / F6 download, F7 makes a folder, F8 deletes on the server.
+        if let Some((conn, items)) = self.panels[self.active].ftp_selection() {
+            self.dialog = None;
+            match key {
+                Key::F5 | Key::F6 => match dest_dir {
+                    Some(dest) if !items.is_empty() => self.dialog = Some(Dialog::FtpDownload { conn, items, dest, delete_source: key == Key::F6 }),
+                    Some(_) => {}
+                    None => self.status = Some("Download into a normal folder: the other panel does not show one.".into()),
+                },
+                Key::F7 => self.dialog = Some(Dialog::MkDir(String::new())),
+                Key::F8 if !items.is_empty() => self.dialog = Some(Dialog::FtpDelete { conn, items }),
+                _ => {}
+            }
+            return;
+        }
+
         // Archive panels are read-only for now; F5 extracts.
         if let Some((index, names)) = self.panels[self.active].archive_selection() {
             self.dialog = None;
@@ -196,6 +269,17 @@ impl App {
                 _ => {}
             }
             return;
+        }
+
+        // A server in the other panel: F5 / F6 upload.
+        if matches!(key, Key::F5 | Key::F6) {
+            if let Some((conn, folder)) = self.panels[other].ftp_folder() {
+                let srcs = self.panels[self.active].targets();
+                if !srcs.is_empty() {
+                    self.dialog = Some(Dialog::FtpUpload { conn, srcs, folder, delete_source: key == Key::F6 });
+                }
+                return;
+            }
         }
 
         let srcs = self.panels[self.active].targets();
@@ -270,6 +354,9 @@ impl App {
             }
             if pressed(ctx, Key::H) {
                 self.open_checksums(ctx);
+            }
+            if pressed(ctx, Key::N) {
+                self.ftp_win.open();
             }
         }
         let panel = &mut self.panels[self.active];
@@ -377,6 +464,10 @@ impl App {
                     self.active = i;
                     self.extract_then_use(ctx, index, inner, mode);
                 }
+                Some(PanelAction::FtpFile { conn, remote, mode }) => {
+                    self.active = i;
+                    self.ftp_then_use(ctx, conn, remote, mode);
+                }
                 Some(PanelAction::Extract) => {
                     self.active = i;
                     self.open_dialog_for(Key::F5, false);
@@ -433,6 +524,65 @@ impl App {
                     spawned = Some(gc_archive::spawn_extract(index, names, dest));
                 } else if !cancel {
                     keep = Some(Dialog::Extract { index, names, dest });
+                }
+            }
+            Dialog::FtpDownload { conn, items, dest, delete_source } => {
+                let verb = if delete_source { "Move" } else { "Copy" };
+                let mut ok = enter;
+                let mut cancel = escape;
+                egui::Window::new(format!("{verb} from server")).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+                    ui.label(format!("{verb} {} item(s) from the server to\n{}", items.len(), dest.display()));
+                    if delete_source {
+                        ui.weak("The server copies are deleted once everything arrived.");
+                    }
+                    ui.horizontal(|ui| {
+                        ok |= ui.button("OK (Enter)").clicked();
+                        cancel |= ui.button("Cancel (Esc)").clicked();
+                    });
+                });
+                if ok {
+                    let label = format!("{verb} {} item(s) from server", items.len());
+                    spawned = Some(jobs::spawn_with(label, move |p| gc_ftp::download(&conn, &items, &dest, delete_source, p)));
+                } else if !cancel {
+                    keep = Some(Dialog::FtpDownload { conn, items, dest, delete_source });
+                }
+            }
+            Dialog::FtpUpload { conn, srcs, folder, delete_source } => {
+                let verb = if delete_source { "Move" } else { "Copy" };
+                let mut ok = enter;
+                let mut cancel = escape;
+                egui::Window::new(format!("{verb} to server")).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+                    ui.label(format!("{verb} {} item(s) to the server folder\n{folder}", srcs.len()));
+                    if delete_source {
+                        ui.weak("The local copies are deleted once everything is uploaded.");
+                    }
+                    ui.horizontal(|ui| {
+                        ok |= ui.button("OK (Enter)").clicked();
+                        cancel |= ui.button("Cancel (Esc)").clicked();
+                    });
+                });
+                if ok {
+                    let label = format!("{verb} {} item(s) to server", srcs.len());
+                    spawned = Some(jobs::spawn_with(label, move |p| gc_ftp::upload(&conn, &srcs, &folder, delete_source, p)));
+                } else if !cancel {
+                    keep = Some(Dialog::FtpUpload { conn, srcs, folder, delete_source });
+                }
+            }
+            Dialog::FtpDelete { conn, items } => {
+                let mut ok = enter;
+                let mut cancel = escape;
+                egui::Window::new("Delete on server").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+                    ui.label(format!("Delete {} item(s) on the server?\nFolders are deleted with everything in them. This cannot be undone.", items.len()));
+                    ui.horizontal(|ui| {
+                        ok |= ui.button("OK (Enter)").clicked();
+                        cancel |= ui.button("Cancel (Esc)").clicked();
+                    });
+                });
+                if ok {
+                    let label = format!("Delete {} item(s) on server", items.len());
+                    spawned = Some(jobs::spawn_with(label, move |p| gc_ftp::delete(&conn, &items, p)));
+                } else if !cancel {
+                    keep = Some(Dialog::FtpDelete { conn, items });
                 }
             }
             Dialog::Pack { srcs, mut dest_dir, mut name, mut format } => {
@@ -561,6 +711,25 @@ impl App {
                 Err(e) => self.status = Some(format!("Create file failed: {e}")),
             }
         }
+        let ftp_mkdir = if self.panels[self.active].is_ftp() { mkdir.take() } else { None };
+        if let Some(name) = ftp_mkdir {
+            let name = name.trim().to_owned();
+            if let Some((conn, folder)) = self.panels[self.active].ftp_folder().filter(|_| !name.is_empty() && !name.contains(['/', '\\'])) {
+                self.status = None;
+                self.panels[self.active].select_after_reload(&name);
+                let remote = gc_ftp::join(&folder, &name);
+                self.jobs.push(RunningJob {
+                    job: jobs::spawn_with("Create folder on server".into(), move |p| {
+                        if let Err(e) = gc_ftp::mkdir(&conn, &remote) {
+                            p.fail(format!("{remote}: {e}"));
+                        }
+                    }),
+                    refreshed: false,
+                });
+            } else {
+                self.status = Some("Enter a plain folder name (one level at a time on a server).".into());
+            }
+        }
         if let Some(name) = mkdir {
             let made = match self.panels[self.active].disk_folder() {
                 Some(dir) => jobs::make_dir(dir, &name),
@@ -678,6 +847,7 @@ impl eframe::App for App {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         log::log("on_exit called");
         gc_archive::cleanup_nested();
+        gc_ftp::cleanup_scratch();
     }
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
@@ -701,6 +871,7 @@ impl App {
             || self.sysinfo.open
             || self.checksums.open
             || self.verify.open
+            || self.ftp_win.open
             || self.viewer.is_open()
             || self.jobs.iter().any(|j| j.job.progress.pending_conflict().is_some());
         if !dialog_open {
@@ -740,6 +911,16 @@ impl App {
                 ui.menu_button("Tools", |ui| {
                     if ui.button("Checksums...  (Ctrl+H)").clicked() {
                         self.open_checksums(ctx);
+                        ui.close_menu();
+                    }
+                });
+                ui.menu_button("Net", |ui| {
+                    if ui.button("FTP connect...  (Ctrl+N)").clicked() {
+                        self.ftp_win.open();
+                        ui.close_menu();
+                    }
+                    if ui.add_enabled(self.panels[self.active].is_ftp(), egui::Button::new("Disconnect active panel")).clicked() {
+                        self.panels[self.active].leave_ftp();
                         ui.close_menu();
                     }
                 });
@@ -818,6 +999,11 @@ impl App {
         self.sysinfo.show(ctx, &self.themes.active);
         self.checksums.show(ctx, &self.themes.active);
         self.verify.show(ctx, &self.themes.active);
+        if let Some(target) = self.ftp_win.show(ctx) {
+            self.status = None;
+            self.panels[self.active].connect_ftp(target);
+        }
+        self.save_dirs_if_changed();
         self.viewer.show(ctx);
         if let Some(err) = self.images.show(ctx) {
             self.status = Some(err);
@@ -865,6 +1051,7 @@ const HINTS: [(bool, bool, bool, &[Hint]); 4] = [
             ("Ctrl+F", "Filter"),
             ("Ctrl+H", "Checksums"),
             ("Ctrl+1/2", "Drive"),
+            ("Ctrl+N", "FTP"),
             ("Ctrl+F3", "Sort name"),
             ("Ctrl+F4", "Sort ext"),
             ("Ctrl+F5", "Sort date"),

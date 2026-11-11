@@ -7,6 +7,7 @@ use std::sync::Arc;
 use eframe::egui::{self, Align2, FontId, Sense, Stroke, StrokeKind};
 use gc_archive::ArchiveIndex;
 use gc_core::{list_dir, Entry};
+use gc_ftp::{RemoteItem, SharedConn, Target};
 
 use crate::theme::Theme;
 
@@ -26,6 +27,29 @@ struct Loading {
     nested: bool,
 }
 
+/// An FTP server shown as a folder tree. The panel's `cwd` is the remote folder (a `/` path).
+struct FtpView {
+    conn: SharedConn,
+    /// `ftp://user@host` for the header.
+    label: String,
+    /// Local folder to go back to when leaving the server.
+    back: PathBuf,
+}
+
+/// What an FTP worker thread brings back.
+enum FtpReply {
+    Connected { conn: SharedConn, label: String, path: String, entries: Vec<Entry> },
+    Listed { path: String, entries: Vec<Entry> },
+}
+
+/// A connect or folder read running on a worker thread.
+struct FtpWork {
+    rx: Receiver<io::Result<FtpReply>>,
+    label: String,
+    /// Name to put the cursor on when the listing arrives.
+    select: Option<String>,
+}
+
 /// What to do with a file once it is on disk.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FileUse {
@@ -42,6 +66,8 @@ pub enum PanelAction {
     Open(PathBuf),
     /// A file inside an archive: extract it to the scratch folder, then use it.
     ArchiveFile { index: Arc<ArchiveIndex>, inner: String, mode: FileUse },
+    /// A file on an FTP server: download it to the scratch folder, then use it.
+    FtpFile { conn: SharedConn, remote: String, mode: FileUse },
     /// Context menu of an archive item: extract the selection to the other panel.
     Extract,
 }
@@ -53,6 +79,9 @@ pub struct Panel {
     /// Archives we descended out of to reach the current nested archive, outermost first.
     stack: Vec<ArchiveView>,
     loading: Option<Loading>,
+    ftp: Option<FtpView>,
+    ftp_work: Option<FtpWork>,
+    select_next: Option<String>,
     ctx: egui::Context,
     pub action: Option<PanelAction>,
     /// The folder as read and sorted; `entries` is what is shown (filtered, with `..`).
@@ -80,6 +109,9 @@ impl Panel {
             archive: None,
             stack: Vec::new(),
             loading: None,
+            ftp: None,
+            ftp_work: None,
+            select_next: None,
             ctx,
             action: None,
             listing: Vec::new(),
@@ -107,7 +139,7 @@ impl Panel {
 
     /// Re-reads the folder if something was added, removed or renamed in it behind our back.
     pub fn refresh_if_changed(&mut self) {
-        if self.archive.is_none() && self.loading.is_none() && self.folder_stamp() != self.stamp {
+        if self.archive.is_none() && self.ftp.is_none() && self.loading.is_none() && self.folder_stamp() != self.stamp {
             self.reload();
         }
     }
@@ -115,6 +147,12 @@ impl Panel {
     /// Re-reads the directory and keeps the cursor on the same name when possible.
     pub fn reload(&mut self) {
         let keep = self.entries.get(self.cursor).map(|e| e.name.clone());
+        if self.ftp.is_some() {
+            // A server read can take long: do it on a worker, the old listing stays until it arrives.
+            let path = gc_ftp::remote_str(&self.cwd);
+            self.ftp_list(path, keep);
+            return;
+        }
         self.stamp = if self.archive.is_none() { self.folder_stamp() } else { None };
         let listing = match &self.archive {
             Some(a) => Ok(a.index.list(&a.inner)),
@@ -144,8 +182,12 @@ impl Panel {
         } else {
             self.listing.iter().filter(|e| needle.is_empty() || e.name.to_lowercase().contains(&needle)).cloned().collect()
         };
-        // Inside an archive there is always a way up (to the folder holding it).
-        if let (Some(parent), None) = (self.cwd.parent(), &self.error) {
+        if self.ftp.is_some() {
+            // On a server there is always a way up: the parent folder, or out of the server at its root.
+            let parent = gc_ftp::parent(&gc_ftp::remote_str(&self.cwd)).unwrap_or_else(|| "/".into());
+            entries.insert(0, Entry { name: PARENT.into(), path: PathBuf::from(parent), is_dir: true, size: 0, modified: None });
+        } else if let (Some(parent), None) = (self.cwd.parent(), &self.error) {
+            // Inside an archive there is always a way up (to the folder holding it).
             entries.insert(0, Entry { name: PARENT.into(), path: parent.to_path_buf(), is_dir: true, size: 0, modified: None });
         }
         self.entries = entries;
@@ -227,12 +269,18 @@ impl Panel {
 
     /// Opens the folder or archive under the cursor (or goes up on the `..` row).
     pub fn enter(&mut self) {
-        if self.loading.is_some() {
+        if self.loading.is_some() || self.ftp_work.is_some() {
             return;
         }
         let Some(e) = self.entries.get(self.cursor).cloned() else { return };
         if e.name == PARENT {
             self.go_up();
+        } else if let Some(v) = &self.ftp {
+            if e.is_dir {
+                self.ftp_list(gc_ftp::remote_str(&e.path), None);
+            } else {
+                self.action = Some(PanelAction::FtpFile { conn: v.conn.clone(), remote: gc_ftp::remote_str(&e.path), mode: FileUse::Open });
+            }
         } else if let Some(a) = &mut self.archive {
             if e.is_dir {
                 a.inner = join_inner(&a.inner, &e.name);
@@ -270,6 +318,7 @@ impl Panel {
 
     /// Picks up a finished archive open; called every frame.
     pub fn poll(&mut self) {
+        self.poll_ftp();
         let Some(l) = &self.loading else { return };
         let result = match l.rx.try_recv() {
             Ok(r) => r,
@@ -308,6 +357,18 @@ impl Panel {
 
     pub fn go_up(&mut self) {
         self.loading = None; // Backspace also cancels an archive that is still opening
+        if self.ftp.is_some() {
+            self.ftp_work = None;
+            let here = gc_ftp::remote_str(&self.cwd);
+            match gc_ftp::parent(&here) {
+                Some(parent) => {
+                    let came_from = here.trim_end_matches('/').rsplit('/').next().map(str::to_owned);
+                    self.ftp_list(parent, came_from);
+                }
+                None => self.leave_ftp(),
+            }
+            return;
+        }
         if let Some(a) = &mut self.archive {
             if let Some((parent, name)) = a.inner.rsplit_once('/') {
                 let (parent, name) = (parent.to_owned(), name.to_owned());
@@ -355,6 +416,8 @@ impl Panel {
 
     fn go_to(&mut self, path: PathBuf, select: Option<String>) {
         self.loading = None;
+        self.ftp_work = None;
+        let previous_ftp = self.ftp.take();
         let previous_archive = self.archive.take();
         let previous_stack = std::mem::take(&mut self.stack);
         let previous = std::mem::replace(&mut self.cwd, path);
@@ -365,20 +428,29 @@ impl Panel {
             self.cwd = previous;
             self.archive = previous_archive;
             self.stack = previous_stack;
+            self.ftp = previous_ftp;
             self.reload();
             self.error = err;
-        } else if let Some(name) = select {
-            self.select_name(&name);
+        } else {
+            if let Some(v) = previous_ftp {
+                std::thread::spawn(move || gc_ftp::disconnect(&v.conn));
+            }
+            if let Some(name) = select {
+                self.select_name(&name);
+            }
         }
     }
 
     /// The folder on disk this panel shows, `None` while an archive is open.
     pub fn disk_folder(&self) -> Option<&Path> {
-        self.archive.is_none().then_some(self.cwd.as_path())
+        (self.archive.is_none() && self.ftp.is_none()).then_some(self.cwd.as_path())
     }
 
     /// Location text for the header, e.g. `C:\data\x.zip\docs`.
     fn location(&self) -> String {
+        if let Some(v) = &self.ftp {
+            return format!("{}{}", v.label, gc_ftp::remote_str(&self.cwd));
+        }
         match &self.archive {
             Some(a) if !a.inner.is_empty() => format!("{}\\{}", a.label, a.inner.replace('/', "\\")),
             Some(a) => a.label.clone(),
@@ -401,7 +473,7 @@ impl Panel {
     /// The plain file under the cursor, for F3 / F4 (not a folder, not inside an archive).
     pub fn current_file(&self) -> Option<PathBuf> {
         let e = self.entries.get(self.cursor)?;
-        (self.archive.is_none() && !e.is_dir && e.name != PARENT).then(|| e.path.clone())
+        (self.archive.is_none() && self.ftp.is_none() && !e.is_dir && e.name != PARENT).then(|| e.path.clone())
     }
 
     /// The plain file under the cursor while an archive is open: archive and inner path.
@@ -413,8 +485,137 @@ impl Panel {
 
     /// Images of the shown folder in listing order, for browsing in the image viewer.
     pub fn image_files(&self) -> Vec<PathBuf> {
-        let on_disk = self.archive.is_none();
+        let on_disk = self.archive.is_none() && self.ftp.is_none();
         self.entries.iter().filter(|e| on_disk && !e.is_dir && crate::image_viewer::is_image(&e.path)).map(|e| e.path.clone()).collect()
+    }
+
+    /// Connects to an FTP server on a worker thread; the panel switches to it when logged in.
+    pub fn connect_ftp(&mut self, target: Target) {
+        let label = target.label();
+        let (tx, rx) = mpsc::channel();
+        let ctx = self.ctx.clone();
+        let l = label.clone();
+        std::thread::spawn(move || {
+            let reply = gc_ftp::connect_and_list(target).map(|(conn, path, entries)| FtpReply::Connected { conn, label: l, path, entries });
+            let _ = tx.send(reply);
+            ctx.request_repaint();
+        });
+        self.loading = None;
+        self.ftp_work = Some(FtpWork { rx, label, select: None });
+        self.error = None;
+    }
+
+    /// Reads remote folder `path` on a worker thread and shows it when it arrives.
+    fn ftp_list(&mut self, path: String, select: Option<String>) {
+        let Some(v) = &self.ftp else { return };
+        let conn = v.conn.clone();
+        let (tx, rx) = mpsc::channel();
+        let ctx = self.ctx.clone();
+        let p = path.clone();
+        std::thread::spawn(move || {
+            let reply = gc_ftp::list(&conn, &p).map(|entries| FtpReply::Listed { path: p, entries });
+            let _ = tx.send(reply);
+            ctx.request_repaint();
+        });
+        self.ftp_work = Some(FtpWork { rx, label: path, select });
+    }
+
+    /// Puts the cursor on `name` once the next listing of a server folder arrives (e.g. a folder just created).
+    pub fn select_after_reload(&mut self, name: &str) {
+        self.select_next = Some(name.to_owned());
+    }
+
+    /// The folder to open again at the next start: the server panel's previous folder, an archive's folder.
+    pub fn restore_dir(&self) -> PathBuf {
+        if let Some(v) = &self.ftp {
+            return v.back.clone();
+        }
+        if self.archive.is_some() {
+            let file = self.stack.first().map(|a| a.index.file.clone()).unwrap_or_else(|| self.cwd.clone());
+            return file.parent().map(Path::to_path_buf).unwrap_or(file);
+        }
+        self.cwd.clone()
+    }
+
+    fn poll_ftp(&mut self) {
+        let Some(w) = &self.ftp_work else { return };
+        let result = match w.rx.try_recv() {
+            Ok(r) => r,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => Err(io::Error::other("worker stopped")),
+        };
+        let Some(w) = self.ftp_work.take() else { return };
+        match result {
+            Ok(FtpReply::Connected { conn, label, path, entries }) => {
+                let back = match self.ftp.take() {
+                    Some(old) => {
+                        let c = old.conn.clone();
+                        std::thread::spawn(move || gc_ftp::disconnect(&c));
+                        old.back
+                    }
+                    None => self.cwd.clone(),
+                };
+                self.archive = None;
+                self.stack.clear();
+                self.ftp = Some(FtpView { conn, label, back });
+                self.show_remote(path, entries, w.select);
+            }
+            Ok(FtpReply::Listed { path, entries }) => self.show_remote(path, entries, w.select),
+            Err(e) => self.error = Some(format!("{}: {e}", w.label)),
+        }
+    }
+
+    fn show_remote(&mut self, path: String, entries: Vec<Entry>, select: Option<String>) {
+        let select = self.select_next.take().or(select);
+        let changed = gc_ftp::remote_str(&self.cwd) != path;
+        self.cwd = PathBuf::from(path);
+        self.listing = entries;
+        self.error = None;
+        if changed {
+            self.marked.clear();
+            self.filter.clear();
+            self.filter_open = false;
+            self.cursor = 0;
+        }
+        sort_entries(&mut self.listing, self.sort, self.sort_desc);
+        self.apply_view(select);
+        self.marked.retain(|m| self.listing.iter().any(|e| &e.path == m));
+        self.scroll_to_cursor = true;
+    }
+
+    /// Closes the server connection and goes back to the folder the panel showed before.
+    pub fn leave_ftp(&mut self) {
+        let Some(v) = self.ftp.take() else { return };
+        let c = v.conn.clone();
+        std::thread::spawn(move || gc_ftp::disconnect(&c));
+        self.go_to(v.back, None);
+    }
+
+    /// While a server is shown: connection and the remote paths of the marked items (or the one under the cursor).
+    pub fn ftp_selection(&self) -> Option<(SharedConn, Vec<RemoteItem>)> {
+        let v = self.ftp.as_ref()?;
+        let items = self
+            .targets()
+            .into_iter()
+            .map(|p| RemoteItem { is_dir: self.entries.iter().any(|e| e.path == p && e.is_dir), path: gc_ftp::remote_str(&p) })
+            .collect();
+        Some((v.conn.clone(), items))
+    }
+
+    /// While a server is shown: connection and the remote folder.
+    pub fn ftp_folder(&self) -> Option<(SharedConn, String)> {
+        self.ftp.as_ref().map(|v| (v.conn.clone(), gc_ftp::remote_str(&self.cwd)))
+    }
+
+    /// While a server is shown: the file under the cursor (for F3 / F4).
+    pub fn ftp_file(&self) -> Option<(SharedConn, String)> {
+        let v = self.ftp.as_ref()?;
+        let e = self.entries.get(self.cursor).filter(|e| !e.is_dir && e.name != PARENT)?;
+        Some((v.conn.clone(), gc_ftp::remote_str(&e.path)))
+    }
+
+    pub fn is_ftp(&self) -> bool {
+        self.ftp.is_some()
     }
 
     /// Puts the cursor on `path` if it is listed.
@@ -539,6 +740,9 @@ impl Panel {
             if let Some(l) = &self.loading {
                 ui.spinner();
                 ui.label(format!("Opening {}...", l.label));
+            } else if let Some(w) = &self.ftp_work {
+                ui.spinner();
+                ui.label(format!("{} {}...", if self.ftp.is_some() { "Reading" } else { "Connecting to" }, w.label));
             } else {
                 ui.add(egui::Label::new(egui::RichText::new(self.location()).monospace()).truncate());
             }
@@ -579,21 +783,21 @@ impl Panel {
                         clicked = true;
                         // Like Explorer: a right click on an unmarked row acts on that row alone.
                         let path = self.entries[i].path.clone();
-                        if self.archive.is_none() {
+                        if self.archive.is_none() && self.ftp.is_none() {
                             let paths = if self.marked.contains(&path) { self.targets() } else { vec![path] };
                             self.action = Some(PanelAction::ShellMenu(paths));
                         } else if !self.marked.contains(&path) {
                             self.marked.clear();
                         }
                     }
-                    if self.archive.is_some() {
+                    if self.archive.is_some() || self.ftp.is_some() {
                         let mut open = false;
                         resp.context_menu(|ui| {
                             if ui.button("Open (Enter)").clicked() {
                                 open = true;
                                 ui.close_menu();
                             }
-                            if ui.button("Extract to other panel (F5)").clicked() {
+                            if ui.button(if self.ftp.is_some() { "Copy to other panel (F5)" } else { "Extract to other panel (F5)" }).clicked() {
                                 self.action = Some(PanelAction::Extract);
                                 ui.close_menu();
                             }

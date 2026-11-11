@@ -259,11 +259,14 @@ pub struct Settings {
     pub drive_buttons: bool,
     /// Free-space bar under each drive button.
     pub drive_free_bar: bool,
+    /// Folders the left / right panel showed when the app was last used.
+    pub left_dir: Option<String>,
+    pub right_dir: Option<String>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { theme: None, drive_buttons: true, drive_free_bar: true }
+        Self { theme: None, drive_buttons: true, drive_free_bar: true, left_dir: None, right_dir: None }
     }
 }
 

@@ -4,7 +4,7 @@ use eframe::egui::{self, Key, RichText};
 
 use crate::theme::Theme;
 
-const GROUPS: [(&str, &[(&str, &str)]); 6] = [
+const GROUPS: [(&str, &[(&str, &str)]); 7] = [
     (
         "Function keys",
         &[
@@ -33,7 +33,19 @@ const GROUPS: [(&str, &[(&str, &str)]); 6] = [
             ("Ctrl+F", "Quick filter (Enter keeps it, Esc clears it)"),
             ("Ctrl+H", "Checksums: CRC-32, MD5, SHA-1, SHA-256 (and Save .crc)"),
             ("Ctrl+1 / Ctrl+2", "Pick a drive for the left / right panel"),
+            ("Ctrl+N", "FTP connect: paste a link (ftp://user:password@host/dir) or pick a saved session"),
             ("Ctrl+F3 / F4 / F5 / F6", "Sort by name / extension / date / size (again = reverse)"),
+        ],
+    ),
+    (
+        "FTP / FTPS (Net menu, Ctrl+N)",
+        &[
+            ("Enter / Backspace", "Open a folder / go up; Backspace at the root of the server disconnects"),
+            ("F5 / F6", "Download to the other panel, or upload from here when the other panel is a server (F6 deletes the source afterwards)"),
+            ("F3 / Enter on a file", "Download to a scratch folder and view / open it"),
+            ("F4", "Edit a local copy (not uploaded back)"),
+            ("F7 / F8", "Create a folder / delete on the server"),
+            ("Drive buttons, Alt+F1/F2", "Leave the server and show a local drive"),
         ],
     ),
     (

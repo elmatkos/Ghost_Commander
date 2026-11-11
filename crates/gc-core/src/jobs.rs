@@ -88,7 +88,7 @@ impl Progress {
     }
 
     /// Called by the worker: blocks until the UI answers (or the job is cancelled).
-    fn ask_conflict(&self, target: &Path) -> Resolution {
+    pub fn ask_conflict(&self, target: &Path) -> Resolution {
         let _turn = self.ask_turn.lock().unwrap();
         if let Some(r) = *self.sticky.lock().unwrap() {
             return r;

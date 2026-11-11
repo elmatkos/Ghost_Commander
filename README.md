@@ -2,7 +2,7 @@
 
 A fast, modern, dual-pane file manager written in Rust. It follows the Norton / Total / Midnight Commander tradition and aims to keep every feature of those three while improving on them.
 
-**Status:** v0.19.6, Windows (x64), actively developed. Also runs under WinPE.
+**Status:** v0.20.0, Windows (x64), actively developed. Also runs under WinPE.
 
 **Repo:** https://github.com/elmatkos/Ghost_Commander
 
@@ -22,6 +22,7 @@ A fast, modern, dual-pane file manager written in Rust. It follows the Norton / 
 | Archives | `sevenz-rust2`, `zip`, `tar`, `flate2`, `lzma-rust2`, `unrar` (read only) |
 | Images | `image` (png, jpeg, gif, bmp, webp, ico) |
 | Hashes | `crc32fast`, `md-5`, `sha1`, `sha2` |
+| FTP / FTPS | `suppaftp` (native TLS via Windows Schannel), passwords saved with Windows DPAPI |
 | Windows | `windows` / `windows-sys` (shell menu, `CopyFileExW`, SMBIOS, drives) |
 
 ## Structure
@@ -33,14 +34,15 @@ Ghost_Commander/
     gc-core/            file ops, background jobs, hashing, file types, Windows fs
     gc-archive/         archive providers (7z, zip, tar, rar read) browsed as folders
     gc-sysinfo/         system information (SMBIOS, CPU, TPM, drives, ...)
+    gc-ftp/             FTP / FTPS client, ftp:// link parsing, saved sessions
     gc-app/             egui app: panels, viewers, themes, dialogs (binary ghost-commander)
 ```
 
 ## Roadmap
 
-Done: dual panes, file operations with job queue, archives as folders (extract/pack), text and image viewers, checksums and verify, themes, System Info, fast copy, WinPE support.
+Done: dual panes, file operations with job queue, archives as folders (extract/pack), text and image viewers, checksums and verify, themes, System Info, fast copy, WinPE support, FTP / FTPS client.
 
-Planned: file compare, sync dirs, multi-rename, search (incl. in archives), tabs, bookmarks, plugins/commands config, FTP/SFTP.
+Planned: file compare, sync dirs, multi-rename, search (incl. in archives), tabs, bookmarks, plugins/commands config, SFTP.
 
 ## How to run
 
@@ -53,6 +55,8 @@ Dual panes, keyboard navigation (arrows, PgUp/PgDn, Home/End, Tab, Enter, Backsp
 Branding lives in `assets/` (`icon.ico` is embedded into the exe by `crates/gc-app/build.rs`, `logo_512.png` is shown in the About window, Help > About).
 
 ## TODO (backlog)
+- **Tabs**: several folders per panel (Ctrl+T new, Ctrl+W close, Ctrl+Tab next), remembered between runs like the panel folders.
+- FTP: implicit FTPS (port 990), SFTP, upload back after F4 on a server file, server-to-server copy, transfers in parallel with browsing (a transfer currently holds the connection).
 - Verify v0.19.0 copy: measure parallel file counts (1/2/4/8/16), test copies between C: D: F: G:, check how parallel copying looks in the GUI.
 
 **Performance: caching and acceleration everywhere possible**
@@ -118,9 +122,23 @@ Panels refresh themselves when files appear, disappear or are renamed in the sho
 
 The bottom line shows only the shortcuts for the modifier keys you hold: plain keys normally, the Shift ones while Shift is held, likewise Ctrl and Alt. Only as many as fit the window width are shown.
 
-F1 opens a Help window listing every function key and shortcut, grouped by modifier (function keys, Shift, Alt, Ctrl, moving around, mouse). About now lives only in the Help menu. F9 opens System Info; the theme editor is in Config > Themes.
+F1 opens a Help window listing every function key and shortcut, grouped by modifier (function keys, Shift, Alt, Ctrl, FTP, moving around, mouse). Alt+F1 / Alt+F2 (and Ctrl+1 / Ctrl+2) pick a drive for the left / right panel. About now lives only in the Help menu. F9 opens System Info; the theme editor is in Config > Themes.
 
 Copy and move (across drives) hand each file to Windows (`CopyFileExW`): the copy runs in the kernel, a network share can copy server to server, ReFS clones instead of copying, and timestamps, attributes and alternate streams are kept. Files of 256 MiB and more bypass the system cache so the RAM is not flushed. Up to four files are copied at once; if the source or target is a spinning disk (detected by the seek-penalty flag) one at a time, so the disk head does not thrash. On a test machine (SSD to SSD) 8000 small files went from 30 s to 4.4 s and a 3 GB file from 1.07 s to 0.9 s. `cargo run --release -p gc-core --example bench_copy -- <source> <destination folder>` times a copy; set `GC_COPY_THREADS=1` to force one file at a time. Moves on one drive are still instant renames.
+
+## FTP / FTPS
+
+Net > FTP connect (Ctrl+N) opens the connection window. Paste a link such as `ftp://mato:secret@lenovo-ts.com/pub` (or `ftps://` for explicit TLS) and press Enter: the active panel becomes that server. A login with special characters is written percent-encoded (`@` as `%40`, `:` as `%3A`, `/` as `%2F`). A link without a login (`ftp://lenovo-ts.com`) uses the saved session of that host when there is one, else logs in anonymously. `ghost-commander ftp://user:pass@host/dir` connects the left panel at start.
+
+"Save as session" (or New in the list) keeps a server under a name: host, port, user, password, start folder, FTPS and "accept self-signed certificate". Sessions live in `%APPDATA%\Ghost Commander\ftp_sessions.toml`; passwords are encrypted with Windows DPAPI, so the file works only for your Windows account on that PC (where DPAPI is missing, e.g. WinPE, passwords are not saved).
+
+A server panel behaves like a folder: Enter / Backspace browse (Backspace at the server's root disconnects), F5 downloads into the other panel's folder, and F5 in a local panel uploads into a server shown in the other panel (F6 moves, deleting the source only after everything arrived; folders are copied recursively, name conflicts open the usual overwrite / skip / rename dialog). F7 makes a folder and F8 deletes on the server (the cursor lands on a new folder). F3 / Enter on a file downloads it to a scratch folder and views / opens it; F4 opens a local copy (it is not uploaded back). Listing and transfers run on worker threads, a dropped connection is reopened on next use, and Cancel aborts a transfer. Drive buttons and Alt+F1 / Alt+F2 leave the server.
+
+Live round trip test against a server: `GC_FTP_TEST_URL=ftp://user:pass@127.0.0.1:2121/ cargo test -p gc-ftp --test live`.
+
+## Remembered folders
+
+Both panels reopen the folders they showed when the app was closed (`left_dir`, `right_dir` in `settings.toml`; a folder that no longer exists falls back to the current folder). While a panel shows an archive or a server, the folder it was opened from is remembered.
 
 ## Running under WinPE (v0.19.6+)
 
