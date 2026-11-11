@@ -22,6 +22,10 @@ pub enum Op {
     Move { srcs: Vec<PathBuf>, dest_dir: PathBuf },
     /// `permanent == false` sends the items to the recycle bin.
     Delete { srcs: Vec<PathBuf>, permanent: bool },
+    /// One item to an exact target path: copy with a new name and/or into a folder that may not exist yet.
+    CopyTo { src: PathBuf, target: PathBuf },
+    /// Like [`Op::CopyTo`] but moves (a rename when the target is in the same folder).
+    MoveTo { src: PathBuf, target: PathBuf },
 }
 
 impl Op {
@@ -29,6 +33,8 @@ impl Op {
         let (verb, n) = match self {
             Op::Copy { srcs, .. } => ("Copy", srcs.len()),
             Op::Move { srcs, .. } => ("Move", srcs.len()),
+            Op::CopyTo { .. } => ("Copy", 1),
+            Op::MoveTo { .. } => ("Move", 1),
             Op::Delete { srcs, permanent: true } => ("Delete", srcs.len()),
             Op::Delete { srcs, permanent: false } => ("Recycle", srcs.len()),
         };
@@ -142,8 +148,13 @@ pub fn spawn_with(label: String, work: impl FnOnce(&Progress) + Send + 'static) 
 
 /// Runs the operation on the current thread. Errors are collected in `progress`.
 pub fn run(op: &Op, p: &Progress) {
+    let single;
     let srcs = match op {
         Op::Copy { srcs, .. } | Op::Move { srcs, .. } | Op::Delete { srcs, .. } => srcs,
+        Op::CopyTo { src, .. } | Op::MoveTo { src, .. } => {
+            single = vec![src.clone()];
+            &single
+        }
     };
     let total: u64 = srcs.iter().map(|s| tree_size(s)).sum();
     p.total.store(total, Ordering::Relaxed);
@@ -153,13 +164,26 @@ pub fn run(op: &Op, p: &Progress) {
             return;
         }
         let result = match op {
-            Op::Copy { dest_dir, .. } => target_of(src, dest_dir).and_then(|t| copy_tree(src, &t, p)),
-            Op::Move { dest_dir, .. } => target_of(src, dest_dir).and_then(|t| move_tree(src, &t, p)),
+            Op::Copy { dest_dir, .. } => fs::create_dir_all(dest_dir).and_then(|_| target_of(src, dest_dir)).and_then(|t| copy_tree(src, &t, p)),
+            Op::Move { dest_dir, .. } => fs::create_dir_all(dest_dir).and_then(|_| target_of(src, dest_dir)).and_then(|t| move_tree(src, &t, p)),
+            Op::CopyTo { target, .. } => prepare_target(src, target).and_then(|_| copy_tree(src, target, p)),
+            Op::MoveTo { target, .. } => prepare_target(src, target).and_then(|_| move_tree(src, target, p)),
             Op::Delete { permanent, .. } => delete_tree(src, *permanent, p),
         };
         if let Err(e) = result {
             p.fail(format!("{}: {e}", src.display()));
         }
+    }
+}
+
+/// For an exact target path: makes sure its folder exists and a folder is not put into itself.
+fn prepare_target(src: &Path, target: &Path) -> io::Result<()> {
+    if src.is_dir() && target.starts_with(src) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "cannot copy a folder into itself"));
+    }
+    match target.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => fs::create_dir_all(parent),
+        _ => Ok(()),
     }
 }
 
@@ -474,6 +498,37 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn copy_and_move_to_an_exact_target() {
+        let root = scratch("exact");
+        let src = root.join("src");
+        fs::create_dir_all(src.join("sub")).unwrap();
+        fs::write(src.join("a.txt"), b"hello").unwrap();
+        // copy under a new name into a folder that does not exist yet
+        let target = root.join("new dir").join("renamed.dat");
+        let p = Progress::default();
+        run(&Op::CopyTo { src: src.join("a.txt"), target: target.clone() }, &p);
+        assert!(p.errors().is_empty(), "{:?}", p.errors());
+        assert_eq!(fs::read(&target).unwrap(), b"hello");
+        assert!(src.join("a.txt").exists());
+        // move in place = rename, extension included
+        let renamed = src.join("b.md");
+        let p = Progress::default();
+        run(&Op::MoveTo { src: src.join("a.txt"), target: renamed.clone() }, &p);
+        assert!(p.errors().is_empty(), "{:?}", p.errors());
+        assert!(renamed.exists() && !src.join("a.txt").exists());
+        // a folder cannot go into itself
+        let p = Progress::default();
+        run(&Op::CopyTo { src: src.clone(), target: src.join("sub").join("x") }, &p);
+        assert_eq!(p.errors().len(), 1);
+        // several items into a folder that does not exist yet
+        let dest = root.join("made").join("later");
+        let p = Progress::default();
+        run(&Op::Copy { srcs: vec![renamed], dest_dir: dest.clone() }, &p);
+        assert!(p.errors().is_empty() && dest.join("b.md").exists(), "{:?}", p.errors());
+        let _ = fs::remove_dir_all(root);
     }
 
     fn sample_tree(root: &Path) -> PathBuf {

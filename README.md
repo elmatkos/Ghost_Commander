@@ -2,7 +2,7 @@
 
 A fast, modern, dual-pane file manager written in Rust. It follows the Norton / Total / Midnight Commander tradition and aims to keep every feature of those three while improving on them.
 
-**Status:** v0.20.3, Windows (x64), actively developed. Also runs under WinPE.
+**Status:** v0.21.0, Windows (x64), actively developed. Also runs under WinPE.
 
 **Repo:** https://github.com/elmatkos/Ghost_Commander
 
@@ -125,6 +125,14 @@ The bottom line shows only the shortcuts for the modifier keys you hold: plain k
 F1 opens a Help window listing every function key and shortcut, grouped by modifier (function keys, Shift, Alt, Ctrl, FTP, moving around, mouse). Alt+F1 / Alt+F2 (and Ctrl+1 / Ctrl+2) pick a drive for the left / right panel. About now lives only in the Help menu. F9 opens System Info; the theme editor is in Config > Themes.
 
 Copy and move (across drives) hand each file to Windows (`CopyFileExW`): the copy runs in the kernel, a network share can copy server to server, ReFS clones instead of copying, and timestamps, attributes and alternate streams are kept. Files of 256 MiB and more bypass the system cache so the RAM is not flushed. Up to four files are copied at once; if the source or target is a spinning disk (detected by the seek-penalty flag) one at a time, so the disk head does not thrash. On a test machine (SSD to SSD) 8000 small files went from 30 s to 4.4 s and a 3 GB file from 1.07 s to 0.9 s. `cargo run --release -p gc-core --example bench_copy -- <source> <destination folder>` times a copy; set `GC_COPY_THREADS=1` to force one file at a time. Moves on one drive are still instant renames.
+
+## Copy, Move, Rename and the command line
+
+F5 / F6 between folders on disk open a dialog with the target in an editable field. For one item the text is the exact target: change the folder, the file name, or both (a new name, a folder that does not exist yet, and F6 into the same folder with a new name is a rename). If the text names another existing folder (or ends with `\`), the item goes into it under its own name; for several items the text is the folder they go into (created when missing). The dialog shows the result before you press OK and refuses an impossible target (same file, folder into itself). The server dialogs (F5 / F6 with an FTP panel) have editable local / remote folders too.
+
+F2 or Shift+F6 renames the item under the cursor: one field with the whole name, extension included, selected so typing replaces it. A right click on a file or folder opens the Explorer menu with our own **Rename (F2)** on top (the shell's own Rename needs an Explorer window); on a server panel the same item is in its small menu and renames over FTP.
+
+Under the panels there is a command line: `folder>` and a text field. Typing any letter starts it (a lone Space still marks files), Enter runs the command in a new console window (`cmd /K`, so the output stays readable) in the folder the active panel shows, Up / Down browse the history, Esc clears it, Tab gives the keyboard back to the panel. `cd <folder>` changes the panel's folder instead. It needs a folder on disk (not an archive or a server).
 
 ## FTP / FTPS
 

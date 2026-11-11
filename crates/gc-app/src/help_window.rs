@@ -4,21 +4,22 @@ use eframe::egui::{self, Key, RichText};
 
 use crate::theme::Theme;
 
-const GROUPS: [(&str, &[(&str, &str)]); 7] = [
+const GROUPS: [(&str, &[(&str, &str)]); 8] = [
     (
         "Function keys",
         &[
             ("F1", "This help"),
+            ("F2", "Rename the item under the cursor (name and extension; also right click > Rename)"),
             ("F3", "View (text viewer, image viewer for pictures)"),
             ("F4", "Edit in Notepad"),
-            ("F5", "Copy to the other panel (from an archive: extract)"),
-            ("F6", "Move to the other panel"),
+            ("F5", "Copy to the other panel (from an archive: extract); the dialog lets you edit the target path and, for one item, the new name"),
+            ("F6", "Move to the other panel; same editable dialog (move to the same folder with a new name = rename)"),
             ("F7", "Make folder"),
             ("F8 / Del", "Move to the recycle bin"),
             ("F9", "System Info"),
         ],
     ),
-    ("Shift", &[("Shift+F4", "Create a new empty file and edit it"), ("Shift+F8 / Shift+Del", "Delete permanently")]),
+    ("Shift", &[("Shift+F4", "Create a new empty file and edit it"), ("Shift+F6", "Rename"), ("Shift+F8 / Shift+Del", "Delete permanently")]),
     (
         "Alt",
         &[
@@ -35,6 +36,15 @@ const GROUPS: [(&str, &[(&str, &str)]); 7] = [
             ("Ctrl+1 / Ctrl+2", "Pick a drive for the left / right panel"),
             ("Ctrl+N", "FTP connect: paste a link (ftp://user:password@host/dir) or pick a saved session"),
             ("Ctrl+F3 / F4 / F5 / F6", "Sort by name / extension / date / size (again = reverse)"),
+        ],
+    ),
+    (
+        "Command line (bottom)",
+        &[
+            ("Type any letter", "Starts the command line; Enter runs it in a new console in the folder shown by the active panel"),
+            ("cd <folder>", "Changes the active panel to that folder instead"),
+            ("Up / Down", "Earlier / later commands"),
+            ("Esc / Tab", "Clear it / give the keyboard back to the panel"),
         ],
     ),
     (

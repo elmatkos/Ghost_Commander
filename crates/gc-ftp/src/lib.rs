@@ -644,6 +644,14 @@ pub fn delete(conn: &SharedConn, items: &[RemoteItem], p: &Progress) {
     }
 }
 
+/// Renames (or moves) a remote file or folder.
+pub fn rename(conn: &SharedConn, from: &str, to: &str) -> io::Result<()> {
+    let mut c = lock(conn);
+    c.ftp()?.rename(from, to).map_err(|e| step_err(&format!("RENAME {from} -> {to}"), e))?;
+    connlog::log(format!("RENAME {from} -> {to}: done"));
+    Ok(())
+}
+
 pub fn mkdir(conn: &SharedConn, path: &str) -> io::Result<()> {
     lock(conn).mkdir(path)
 }

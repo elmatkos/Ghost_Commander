@@ -46,8 +46,12 @@ enum Dialog {
     Drives { panel: usize, list: Vec<PathBuf>, sel: usize },
     /// Extract inner paths of an archive into a folder.
     Extract { index: Arc<ArchiveIndex>, names: Vec<String>, dest: PathBuf },
-    /// F5 / F6 on a server panel: download `items` into the local folder `dest`.
-    FtpDownload { conn: gc_ftp::SharedConn, items: Vec<gc_ftp::RemoteItem>, dest: PathBuf, delete_source: bool },
+    /// F5 / F6 between folders on disk: the target path (and, for one item, its new name) can be edited.
+    Transfer { srcs: Vec<PathBuf>, base: PathBuf, text: String, is_move: bool, fresh: bool },
+    /// F2 / Shift+F6: new name (with extension) for one item; `conn` for an item on a server.
+    Rename { path: PathBuf, name: String, conn: Option<gc_ftp::SharedConn>, fresh: bool },
+    /// F5 / F6 on a server panel: download `items` into the local folder `dest` (editable).
+    FtpDownload { conn: gc_ftp::SharedConn, items: Vec<gc_ftp::RemoteItem>, dest: String, delete_source: bool },
     /// F5 / F6 into a server panel: upload local `srcs` into the remote folder.
     FtpUpload { conn: gc_ftp::SharedConn, srcs: Vec<PathBuf>, folder: String, delete_source: bool },
     /// F8 on a server panel.
@@ -79,6 +83,12 @@ struct App {
     verify: VerifyWindow,
     ftp_win: FtpWindow,
     ftp_log: FtpLogWindow,
+    /// Command line under the panels: text, focus request, focus last frame, history.
+    cmd_text: String,
+    cmd_focus: bool,
+    cmd_has_focus: bool,
+    cmd_history: Vec<String>,
+    cmd_pos: Option<usize>,
     /// Folders last written to settings (to notice a change and save the new ones).
     saved_dirs: [PathBuf; 2],
     /// Drive list with free space, refreshed by a background thread (a dead network drive can block).
@@ -111,6 +121,11 @@ impl App {
             saved_dirs: [left, right],
             ftp_win: FtpWindow::default(),
             ftp_log: FtpLogWindow::default(),
+            cmd_text: String::new(),
+            cmd_focus: false,
+            cmd_has_focus: false,
+            cmd_history: Vec::new(),
+            cmd_pos: None,
             active: 0,
             dialog: None,
             jobs: Vec::new(),
@@ -250,7 +265,7 @@ impl App {
             self.dialog = None;
             match key {
                 Key::F5 | Key::F6 => match dest_dir {
-                    Some(dest) if !items.is_empty() => self.dialog = Some(Dialog::FtpDownload { conn, items, dest, delete_source: key == Key::F6 }),
+                    Some(dest) if !items.is_empty() => self.dialog = Some(Dialog::FtpDownload { conn, items, dest: dest.display().to_string(), delete_source: key == Key::F6 }),
                     Some(_) => {}
                     None => self.status = Some("Download into a normal folder: the other panel does not show one.".into()),
                 },
@@ -286,8 +301,13 @@ impl App {
 
         let srcs = self.panels[self.active].targets();
         self.dialog = match (key, dest_dir) {
-            (Key::F5, Some(dest_dir)) if !srcs.is_empty() => Some(Dialog::Confirm(Op::Copy { srcs, dest_dir })),
-            (Key::F6, Some(dest_dir)) if !srcs.is_empty() => Some(Dialog::Confirm(Op::Move { srcs, dest_dir })),
+            (Key::F5 | Key::F6, Some(dest_dir)) if !srcs.is_empty() => {
+                let text = match srcs.as_slice() {
+                    [one] => one.file_name().map_or_else(|| dest_dir.clone(), |n| dest_dir.join(n)),
+                    _ => dest_dir.clone(),
+                };
+                Some(Dialog::Transfer { text: text.display().to_string(), srcs, base: dest_dir, is_move: key == Key::F6, fresh: true })
+            }
             (Key::F5 | Key::F6, None) => {
                 self.status = Some("Archives are read-only here; Alt+F5 packs into a new archive.".into());
                 None
@@ -296,6 +316,133 @@ impl App {
             (Key::F7, _) => Some(Dialog::MkDir(String::new())),
             _ => None,
         };
+    }
+
+    /// F2 / Shift+F6 / right click > Rename: asks for a new name (with extension) for the item under the cursor.
+    fn open_rename(&mut self) {
+        let panel = &self.panels[self.active];
+        if panel.disk_folder().is_none() && !panel.is_ftp() {
+            self.status = Some("Archives are read-only: files inside cannot be renamed.".into());
+            return;
+        }
+        let conn = panel.ftp_folder().map(|(c, _)| c);
+        match panel.cursor_entry() {
+            Some((path, name)) => self.dialog = Some(Dialog::Rename { path, name, conn, fresh: true }),
+            None => self.status = Some("Select a file or folder to rename first.".into()),
+        }
+    }
+
+    fn do_rename(&mut self, conn: Option<gc_ftp::SharedConn>, path: PathBuf, new: String) {
+        let old = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if new == old {
+            return;
+        }
+        match conn {
+            Some(conn) => {
+                let from = gc_ftp::remote_str(&path);
+                let to = gc_ftp::join(&gc_ftp::parent(&from).unwrap_or_else(|| "/".into()), &new);
+                self.panels[self.active].select_after_reload(&new);
+                let job = jobs::spawn_with("Rename on server".into(), move |p| {
+                    if let Err(e) = gc_ftp::rename(&conn, &from, &to) {
+                        p.fail(format!("{from}: {e}"));
+                    }
+                });
+                self.jobs.push(RunningJob { job, refreshed: false });
+            }
+            None => {
+                let to = path.with_file_name(&new);
+                if to.exists() && !old.eq_ignore_ascii_case(&new) {
+                    self.status = Some(format!("\"{new}\" already exists here."));
+                    return;
+                }
+                match std::fs::rename(&path, &to) {
+                    Ok(()) => {
+                        self.status = None;
+                        self.reload_all();
+                        self.panels[self.active].select_path(&to);
+                    }
+                    Err(e) => self.status = Some(format!("Rename failed: {e}")),
+                }
+            }
+        }
+    }
+
+    /// Runs the command line text in a new console, in the folder the active panel shows.
+    /// `cd <folder>` changes the panel's folder instead.
+    fn run_command(&mut self) {
+        let cmd = self.cmd_text.trim().to_owned();
+        if cmd.is_empty() {
+            return;
+        }
+        let Some(dir) = self.panels[self.active].disk_folder().map(Path::to_path_buf) else {
+            self.status = Some("Commands run in a folder on disk; this panel shows an archive or a server.".into());
+            return;
+        };
+        self.cmd_history.retain(|h| h != &cmd);
+        self.cmd_history.push(cmd.clone());
+        if self.cmd_history.len() > 100 {
+            self.cmd_history.remove(0);
+        }
+        self.cmd_pos = None;
+        let lower = cmd.to_ascii_lowercase();
+        if lower == "cd" || lower.starts_with("cd ") || lower.starts_with("cd\\") || lower.starts_with("cd/") {
+            let arg = cmd[2..].trim().trim_start_matches("/d").trim().trim_matches('"');
+            let target = if arg.is_empty() { dir.clone() } else { dir.join(arg) };
+            match target.canonicalize().map(|p| p.display().to_string().trim_start_matches("\\\\?\\").to_owned()) {
+                Ok(p) if PathBuf::from(&p).is_dir() => {
+                    self.panels[self.active].open_root(PathBuf::from(p));
+                    self.cmd_text.clear();
+                    self.status = None;
+                }
+                _ => self.status = Some(format!("cd: \"{arg}\" is not a folder.")),
+            }
+            return;
+        }
+        #[cfg(windows)]
+        let spawned = {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NEW_CONSOLE: u32 = 0x10;
+            // /K keeps the console open to read the output; the extra quotes keep cmd from
+            // stripping the first and last quote of a command that starts with a quoted path.
+            std::process::Command::new("cmd.exe").arg("/K").raw_arg(format!("\"{cmd}\"")).current_dir(&dir).creation_flags(CREATE_NEW_CONSOLE).spawn()
+        };
+        #[cfg(not(windows))]
+        let spawned = std::process::Command::new("sh").arg("-c").arg(&cmd).current_dir(&dir).spawn();
+        match spawned {
+            Ok(_) => {
+                self.cmd_text.clear();
+                self.status = None;
+            }
+            Err(e) => self.status = Some(format!("Cannot run the command: {e}")),
+        }
+    }
+
+    /// The command line under the panels: prompt with the folder, then the text field.
+    fn show_cmdline(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let prompt = match self.panels[self.active].disk_folder() {
+            Some(d) => {
+                let text = d.display().to_string();
+                let n = text.chars().count();
+                format!("{}>", if n > 40 { format!("...{}", text.chars().skip(n - 37).collect::<String>()) } else { text })
+            }
+            None => "(no folder on disk)>".to_owned(),
+        };
+        ui.horizontal(|ui| {
+            ui.monospace(prompt);
+            let edit = ui.add(egui::TextEdit::singleline(&mut self.cmd_text).font(egui::TextStyle::Monospace).hint_text("type a command, Enter runs it in this folder").desired_width(f32::INFINITY));
+            if std::mem::take(&mut self.cmd_focus) {
+                edit.request_focus();
+                if let Some(mut state) = egui::TextEdit::load_state(ctx, edit.id) {
+                    let end = egui::text::CCursor::new(self.cmd_text.chars().count());
+                    state.cursor.set_char_range(Some(egui::text::CCursorRange::one(end)));
+                    state.store(ctx, edit.id);
+                }
+            }
+            self.cmd_has_focus = edit.has_focus();
+            if edit.lost_focus() && ctx.input(|i| i.key_pressed(Key::Enter)) {
+                self.run_command();
+            }
+        });
     }
 
     /// Alt+F5: pack the selection into a new archive in the other panel's folder (or this one's).
@@ -339,6 +486,49 @@ impl App {
             if pressed(ctx, Key::ArrowUp) {
                 panel.move_cursor(-1);
             }
+            return;
+        }
+        // The command line has the keyboard while it is focused.
+        if self.cmd_has_focus {
+            let blur = |ctx: &egui::Context| {
+                ctx.memory_mut(|m| {
+                    if let Some(id) = m.focused() {
+                        m.surrender_focus(id);
+                    }
+                });
+            };
+            if pressed(ctx, Key::Escape) {
+                self.cmd_text.clear();
+                self.cmd_pos = None;
+                blur(ctx);
+            }
+            if pressed(ctx, Key::Tab) {
+                blur(ctx);
+            }
+            if pressed(ctx, Key::ArrowUp) && !self.cmd_history.is_empty() {
+                let pos = self.cmd_pos.map_or(self.cmd_history.len() - 1, |p| p.saturating_sub(1));
+                self.cmd_pos = Some(pos);
+                self.cmd_text = self.cmd_history[pos].clone();
+            }
+            if pressed(ctx, Key::ArrowDown) {
+                match self.cmd_pos {
+                    Some(p) if p + 1 < self.cmd_history.len() => {
+                        self.cmd_pos = Some(p + 1);
+                        self.cmd_text = self.cmd_history[p + 1].clone();
+                    }
+                    _ => {
+                        self.cmd_pos = None;
+                        self.cmd_text.clear();
+                    }
+                }
+            }
+            return;
+        }
+        // Typing a letter or digit starts the command line (a lone Space still marks).
+        let typed: String = ctx.input(|i| i.events.iter().filter_map(|e| if let egui::Event::Text(t) = e { Some(t.as_str()) } else { None }).collect());
+        if typed.chars().any(|c| !c.is_whitespace() && !c.is_control()) {
+            self.cmd_text.push_str(if self.cmd_text.is_empty() { typed.trim_start() } else { &typed });
+            self.cmd_focus = true;
             return;
         }
         if ctrl {
@@ -403,10 +593,15 @@ impl App {
         }
         let shift = ctx.input(|i| i.modifiers.shift);
         let alt = ctx.input(|i| i.modifiers.alt);
+        if pressed(ctx, Key::F2) && !alt && !ctrl && !shift {
+            self.open_rename();
+        }
         for key in [Key::F5, Key::F6, Key::F7, Key::F8] {
             if pressed(ctx, key) && !ctrl {
                 if alt && key == Key::F5 {
                     self.open_pack_dialog();
+                } else if shift && key == Key::F6 {
+                    self.open_rename();
                 } else {
                     self.open_dialog_for(key, shift);
                 }
@@ -449,12 +644,22 @@ impl App {
             match self.panels[i].action.take() {
                 Some(PanelAction::ShellMenu(paths)) => {
                     self.active = i;
+                    let mut rename = false;
                     self.status = match window_handle(frame) {
-                        Some(hwnd) => shell_menu::show(hwnd, &paths).err().map(|e| format!("Context menu failed: {e}")),
+                        Some(hwnd) => match shell_menu::show(hwnd, &paths) {
+                            Ok(chose_rename) => {
+                                rename = chose_rename;
+                                None
+                            }
+                            Err(e) => Some(format!("Context menu failed: {e}")),
+                        },
                         None => Some("Context menu failed: no window handle.".into()),
                     };
                     // The menu may have deleted, renamed or created items.
                     self.reload_all();
+                    if rename {
+                        self.open_rename();
+                    }
                 }
                 Some(PanelAction::Open(path)) => {
                     self.active = i;
@@ -469,6 +674,10 @@ impl App {
                     self.extract_then_use(ctx, index, inner, mode);
                 }
                 Some(PanelAction::FtpLog) => self.ftp_log.open = true,
+                Some(PanelAction::Rename) => {
+                    self.active = i;
+                    self.open_rename();
+                }
                 Some(PanelAction::FtpFile { conn, remote, mode }) => {
                     self.active = i;
                     self.ftp_then_use(ctx, conn, remote, mode);
@@ -490,6 +699,7 @@ impl App {
         let mut run: Option<Op> = None;
         let mut mkdir: Option<String> = None;
         let mut newfile: Option<String> = None;
+        let mut rename: Option<(Option<gc_ftp::SharedConn>, PathBuf, String)> = None;
         let mut spawned: Option<Job> = None;
 
         match dialog {
@@ -497,6 +707,8 @@ impl App {
                 let text = match &op {
                     Op::Copy { srcs, dest_dir } => format!("Copy {} item(s) to\n{}", srcs.len(), dest_dir.display()),
                     Op::Move { srcs, dest_dir } => format!("Move {} item(s) to\n{}", srcs.len(), dest_dir.display()),
+                    Op::CopyTo { target, .. } => format!("Copy to {}", target.display()),
+                    Op::MoveTo { target, .. } => format!("Move to {}", target.display()),
                     Op::Delete { srcs, permanent: true } => format!("Permanently delete {} item(s)?\nThis cannot be undone.", srcs.len()),
                     Op::Delete { srcs, permanent: false } => format!("Move {} item(s) to the recycle bin?", srcs.len()),
                 };
@@ -531,12 +743,93 @@ impl App {
                     keep = Some(Dialog::Extract { index, names, dest });
                 }
             }
-            Dialog::FtpDownload { conn, items, dest, delete_source } => {
+            Dialog::Transfer { srcs, base, mut text, is_move, mut fresh } => {
+                let verb = if is_move { "Move" } else { "Copy" };
+                let plan = resolve_transfer(&srcs, &base, &text, is_move);
+                let mut ok = enter && plan.is_ok();
+                let mut cancel = escape;
+                let error = self.themes.active.error.0;
+                egui::Window::new(verb).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+                    let what = match srcs.as_slice() {
+                        [one] => format!("\"{}\"", one.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
+                        _ => format!("{} items", srcs.len()),
+                    };
+                    ui.label(format!("{verb} {what} to (edit the path{}):", if srcs.len() == 1 { " and the new name" } else { "" }));
+                    let edit = ui.add(egui::TextEdit::singleline(&mut text).desired_width(560.0));
+                    if std::mem::take(&mut fresh) {
+                        edit.request_focus();
+                        if let Some(mut state) = egui::TextEdit::load_state(ctx, edit.id) {
+                            let end = egui::text::CCursor::new(text.chars().count());
+                            state.cursor.set_char_range(Some(egui::text::CCursorRange::one(end)));
+                            state.store(ctx, edit.id);
+                        }
+                    } else {
+                        edit.request_focus();
+                    }
+                    match &plan {
+                        Ok(op) => {
+                            ui.weak(match op {
+                                Op::CopyTo { target, .. } | Op::MoveTo { target, .. } => format!("Result: {}", target.display()),
+                                Op::Copy { dest_dir, .. } | Op::Move { dest_dir, .. } => format!("Into folder: {}{}", dest_dir.display(), if dest_dir.exists() { "" } else { "  (will be created)" }),
+                                Op::Delete { .. } => String::new(),
+                            });
+                        }
+                        Err(e) => {
+                            ui.colored_label(error, e);
+                        }
+                    }
+                    ui.horizontal(|ui| {
+                        ok |= ui.add_enabled(plan.is_ok(), egui::Button::new("OK (Enter)")).clicked();
+                        cancel |= ui.button("Cancel (Esc)").clicked();
+                    });
+                });
+                if ok {
+                    run = plan.ok();
+                } else if !cancel {
+                    keep = Some(Dialog::Transfer { srcs, base, text, is_move, fresh });
+                }
+            }
+            Dialog::Rename { path, mut name, conn, mut fresh } => {
+                let old = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let problem = rename_problem(&name);
+                let mut ok = enter && problem.is_none();
+                let mut cancel = escape;
+                let error = self.themes.active.error.0;
+                egui::Window::new("Rename").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+                    ui.label(format!("New name for \"{old}\" (the extension is part of the name):"));
+                    let edit = ui.add(egui::TextEdit::singleline(&mut name).desired_width(420.0));
+                    if std::mem::take(&mut fresh) {
+                        edit.request_focus();
+                        // The whole name is selected, so typing replaces it.
+                        if let Some(mut state) = egui::TextEdit::load_state(ctx, edit.id) {
+                            let range = egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(name.chars().count()));
+                            state.cursor.set_char_range(Some(range));
+                            state.store(ctx, edit.id);
+                        }
+                    } else {
+                        edit.request_focus();
+                    }
+                    if let Some(p) = problem {
+                        ui.colored_label(error, p);
+                    }
+                    ui.horizontal(|ui| {
+                        ok |= ui.add_enabled(problem.is_none(), egui::Button::new("Rename (Enter)")).clicked();
+                        cancel |= ui.button("Cancel (Esc)").clicked();
+                    });
+                });
+                if ok {
+                    rename = Some((conn, path, name.trim().to_owned()));
+                } else if !cancel {
+                    keep = Some(Dialog::Rename { path, name, conn, fresh });
+                }
+            }
+            Dialog::FtpDownload { conn, items, mut dest, delete_source } => {
                 let verb = if delete_source { "Move" } else { "Copy" };
                 let mut ok = enter;
                 let mut cancel = escape;
                 egui::Window::new(format!("{verb} from server")).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
-                    ui.label(format!("{verb} {} item(s) from the server to\n{}", items.len(), dest.display()));
+                    ui.label(format!("{verb} {} item(s) from the server to this folder (editable, created if missing):", items.len()));
+                    ui.add(egui::TextEdit::singleline(&mut dest).desired_width(520.0)).request_focus();
                     if delete_source {
                         ui.weak("The server copies are deleted once everything arrived.");
                     }
@@ -547,17 +840,24 @@ impl App {
                 });
                 if ok {
                     let label = format!("{verb} {} item(s) from server", items.len());
-                    spawned = Some(jobs::spawn_with(label, move |p| gc_ftp::download(&conn, &items, &dest, delete_source, p)));
+                    spawned = Some(jobs::spawn_with(label, move |p| {
+                        let dir = PathBuf::from(dest.trim());
+                        match std::fs::create_dir_all(&dir) {
+                            Ok(()) => gc_ftp::download(&conn, &items, &dir, delete_source, p),
+                            Err(e) => p.fail(format!("{}: {e}", dir.display())),
+                        }
+                    }));
                 } else if !cancel {
                     keep = Some(Dialog::FtpDownload { conn, items, dest, delete_source });
                 }
             }
-            Dialog::FtpUpload { conn, srcs, folder, delete_source } => {
+            Dialog::FtpUpload { conn, srcs, mut folder, delete_source } => {
                 let verb = if delete_source { "Move" } else { "Copy" };
                 let mut ok = enter;
                 let mut cancel = escape;
                 egui::Window::new(format!("{verb} to server")).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
-                    ui.label(format!("{verb} {} item(s) to the server folder\n{folder}", srcs.len()));
+                    ui.label(format!("{verb} {} item(s) to this server folder (editable):", srcs.len()));
+                    ui.add(egui::TextEdit::singleline(&mut folder).desired_width(520.0)).request_focus();
                     if delete_source {
                         ui.weak("The local copies are deleted once everything is uploaded.");
                     }
@@ -568,6 +868,7 @@ impl App {
                 });
                 if ok {
                     let label = format!("{verb} {} item(s) to server", srcs.len());
+                    let folder = if folder.trim().starts_with('/') { folder.trim().to_owned() } else { format!("/{}", folder.trim()) };
                     spawned = Some(jobs::spawn_with(label, move |p| gc_ftp::upload(&conn, &srcs, &folder, delete_source, p)));
                 } else if !cancel {
                     keep = Some(Dialog::FtpUpload { conn, srcs, folder, delete_source });
@@ -715,6 +1016,9 @@ impl App {
                 }
                 Err(e) => self.status = Some(format!("Create file failed: {e}")),
             }
+        }
+        if let Some((conn, path, new)) = rename {
+            self.do_rename(conn, path, new);
         }
         let ftp_mkdir = if self.panels[self.active].is_ftp() { mkdir.take() } else { None };
         if let Some(name) = ftp_mkdir {
@@ -883,7 +1187,7 @@ impl App {
             self.handle_keys(ctx);
             // Tab switches panels here. egui also uses it to move the keyboard focus to a button,
             // where Enter or Space would then press it: keep nothing focused.
-            if !self.panels.iter().any(|p| p.filter_open()) {
+            if !self.panels.iter().any(|p| p.filter_open()) && !self.cmd_has_focus && !self.cmd_focus {
                 ctx.memory_mut(|m| {
                     if let Some(id) = m.focused() {
                         m.surrender_focus(id);
@@ -957,6 +1261,7 @@ impl App {
                 ui.colored_label(self.themes.active.error.0, s);
             }
             self.show_jobs(ui);
+            self.show_cmdline(ui, ctx);
             show_hints(ui);
         });
 
@@ -1029,6 +1334,56 @@ impl App {
     }
 }
 
+/// Turns what was typed into the Copy / Move dialog into a job. For one item the text is the exact
+/// target (path and new name); when it names an existing folder (or ends with `\`) the item goes into
+/// it under its own name. For several items the text is the folder they go into (created if missing).
+fn resolve_transfer(srcs: &[PathBuf], base: &Path, text: &str, is_move: bool) -> Result<Op, String> {
+    let t = text.trim().trim_matches('"');
+    if t.is_empty() {
+        return Err("Enter a target.".into());
+    }
+    let mut dest = PathBuf::from(t);
+    if dest.is_relative() {
+        dest = base.join(dest);
+    }
+    if let [src] = srcs {
+        let trailing = t.ends_with(['\\', '/']);
+        let same_name = dest.file_name().zip(src.file_name()).is_some_and(|(a, b)| a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy()));
+        if !trailing && (!dest.is_dir() || same_name) {
+            if dest.to_string_lossy().eq_ignore_ascii_case(&src.to_string_lossy()) {
+                return Err("Source and target are the same.".into());
+            }
+            if src.is_dir() && dest.starts_with(src) {
+                return Err("A folder cannot go into itself.".into());
+            }
+            if dest.file_name().is_none_or(|n| rename_problem(&n.to_string_lossy()).is_some()) {
+                return Err("The target has no valid file name.".into());
+            }
+            let src = src.clone();
+            return Ok(if is_move { Op::MoveTo { src, target: dest } } else { Op::CopyTo { src, target: dest } });
+        }
+    }
+    if dest.is_file() {
+        return Err("That is a file, not a folder.".into());
+    }
+    let srcs = srcs.to_vec();
+    Ok(if is_move { Op::Move { srcs, dest_dir: dest } } else { Op::Copy { srcs, dest_dir: dest } })
+}
+
+/// Why `name` cannot be a file name, if it cannot.
+fn rename_problem(name: &str) -> Option<&'static str> {
+    let n = name.trim();
+    if n.is_empty() {
+        Some("Enter a name.")
+    } else if n.contains(['\\', '/', ':', '*', '?', '"', '<', '>', '|']) {
+        Some("A name cannot contain any of  \\ / : * ? \" < > |")
+    } else if n.ends_with('.') {
+        Some("A name cannot end with a dot.")
+    } else {
+        None
+    }
+}
+
 /// Shortcut hints for the bottom line, grouped by the modifier keys that must be held.
 /// (ctrl, shift, alt, [(key, label)]). The group matching the keys held right now is shown.
 type Hint = (&'static str, &'static str);
@@ -1039,6 +1394,7 @@ const HINTS: [(bool, bool, bool, &[Hint]); 4] = [
         false,
         &[
             ("F1", "Help"),
+            ("F2", "Rename"),
             ("F3", "View"),
             ("F4", "Edit"),
             ("F5", "Copy"),
@@ -1051,7 +1407,7 @@ const HINTS: [(bool, bool, bool, &[Hint]); 4] = [
             ("Bksp", "Up"),
         ],
     ),
-    (false, true, false, &[("Shift+F4", "New file"), ("Shift+F8/Del", "Delete")]),
+    (false, true, false, &[("Shift+F4", "New file"), ("Shift+F6", "Rename"), ("Shift+F8/Del", "Delete")]),
     (
         true,
         false,
@@ -1171,4 +1527,62 @@ fn watch_drives(ctx: &egui::Context) -> Arc<std::sync::Mutex<Vec<gc_core::DriveI
         std::thread::sleep(Duration::from_secs(3));
     });
     shared
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("gc_app_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn single_item_target_is_exact_unless_it_is_another_folder() {
+        let root = scratch("transfer");
+        let (src_dir, dest) = (root.join("src"), root.join("dest"));
+        std::fs::create_dir_all(src_dir.join("data")).unwrap();
+        std::fs::create_dir_all(dest.join("data")).unwrap();
+        std::fs::create_dir_all(root.join("other")).unwrap();
+        let file = src_dir.join("a.txt");
+        std::fs::write(&file, b"x").unwrap();
+
+        // the default text (dest folder + same name) is the exact target
+        let op = resolve_transfer(&[file.clone()], &dest, &dest.join("a.txt").display().to_string(), false).unwrap();
+        assert!(matches!(op, Op::CopyTo { target, .. } if target == dest.join("a.txt")));
+        // a new name and a folder that does not exist yet
+        let text = dest.join("new").join("b.dat").display().to_string();
+        assert!(matches!(resolve_transfer(&[file.clone()], &dest, &text, true).unwrap(), Op::MoveTo { .. }));
+        // an existing folder with another name: into it
+        let text = root.join("other").display().to_string();
+        assert!(matches!(resolve_transfer(&[file.clone()], &dest, &text, false).unwrap(), Op::Copy { dest_dir, .. } if dest_dir == root.join("other")));
+        // a folder onto the same-named existing folder merges (exact target), not data\data
+        let folder = src_dir.join("data");
+        let text = dest.join("data").display().to_string();
+        assert!(matches!(resolve_transfer(&[folder.clone()], &dest, &text, false).unwrap(), Op::CopyTo { target, .. } if target == dest.join("data")));
+        // trailing separator = into that folder
+        let text = format!("{}\\", dest.join("data").display());
+        assert!(matches!(resolve_transfer(&[file.clone()], &dest, &text, false).unwrap(), Op::Copy { .. }));
+        // problems
+        assert!(resolve_transfer(&[file.clone()], &dest, &file.display().to_string(), false).is_err());
+        assert!(resolve_transfer(&[folder.clone()], &dest, &folder.join("in").display().to_string(), false).is_err());
+        assert!(resolve_transfer(&[file.clone()], &dest, "  ", false).is_err());
+        // several items: always a folder
+        let two = [file.clone(), folder];
+        let text = dest.join("fresh").display().to_string();
+        assert!(matches!(resolve_transfer(&two, &dest, &text, false).unwrap(), Op::Copy { .. }));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rename_names_are_checked() {
+        assert!(rename_problem("report.final.txt").is_none());
+        assert!(rename_problem("").is_some());
+        assert!(rename_problem("a/b").is_some());
+        assert!(rename_problem("a?.txt").is_some());
+        assert!(rename_problem("name.").is_some());
+    }
 }

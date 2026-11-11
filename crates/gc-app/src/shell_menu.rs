@@ -4,16 +4,18 @@
 use std::path::PathBuf;
 
 /// Shows the shell menu for `paths` (all in one folder) at the mouse position and runs the
-/// chosen command. Blocks in the menu's own message loop until it is closed.
+/// chosen command. Blocks in the menu's own message loop until it is closed. The menu starts with
+/// our own "Rename (F2)" item (the shell's Rename needs an Explorer window); `Ok(true)` means it
+/// was chosen.
 #[cfg(windows)]
-pub fn show(hwnd: isize, paths: &[PathBuf]) -> Result<(), String> {
+pub fn show(hwnd: isize, paths: &[PathBuf]) -> Result<bool, String> {
     // SAFETY: plain Win32 / COM calls; every pointer comes from the shell and is used
     // only while the owning object is alive (see `Pidl` and the `menu` binding).
     unsafe { imp::show(windows::Win32::Foundation::HWND(hwnd as _), paths).map_err(|e| e.to_string()) }
 }
 
 #[cfg(not(windows))]
-pub fn show(_hwnd: isize, _paths: &[PathBuf]) -> Result<(), String> {
+pub fn show(_hwnd: isize, _paths: &[PathBuf]) -> Result<bool, String> {
     Err("the shell menu is only available on Windows".into())
 }
 
@@ -34,12 +36,14 @@ mod imp {
         SetWindowSubclass, CMF_NORMAL, CMINVOKECOMMANDINFO,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreatePopupMenu, DestroyMenu, GetCursorPos, SetForegroundWindow, TrackPopupMenuEx, SW_SHOWNORMAL, TPM_RETURNCMD,
-        TPM_RIGHTBUTTON, WM_DRAWITEM, WM_INITMENUPOPUP, WM_MEASUREITEM,
+        CreatePopupMenu, DestroyMenu, GetCursorPos, InsertMenuW, SetForegroundWindow, TrackPopupMenuEx, MF_BYPOSITION, MF_SEPARATOR,
+        MF_STRING, SW_SHOWNORMAL, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_DRAWITEM, WM_INITMENUPOPUP, WM_MEASUREITEM,
     };
 
     const ID_FIRST: u32 = 1;
     const ID_LAST: u32 = 0x7FFF;
+    /// Our own item, above the range the shell hands out.
+    const ID_RENAME: u32 = 0x8000;
     const SUBCLASS_ID: usize = 0x6743; // "gC"
 
     /// Absolute item id list allocated by the shell.
@@ -52,7 +56,7 @@ mod imp {
         }
     }
 
-    pub unsafe fn show(hwnd: HWND, paths: &[PathBuf]) -> windows::core::Result<()> {
+    pub unsafe fn show(hwnd: HWND, paths: &[PathBuf]) -> windows::core::Result<bool> {
         let mut pidls = Vec::new();
         for path in paths {
             let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
@@ -68,12 +72,14 @@ mod imp {
             children.push(last);
             folder.get_or_insert(parent);
         }
-        let Some(folder) = folder else { return Ok(()) };
+        let Some(folder) = folder else { return Ok(false) };
         let menu: IContextMenu = folder.GetUIObjectOf(hwnd, &children, None)?;
 
         let hmenu = CreatePopupMenu()?;
         let result = (|| {
             menu.QueryContextMenu(hmenu, 0, ID_FIRST, ID_LAST, CMF_NORMAL)?;
+            InsertMenuW(hmenu, 0, MF_BYPOSITION | MF_STRING, ID_RENAME as usize, windows::core::w!("Rename (F2)"))?;
+            InsertMenuW(hmenu, 1, MF_BYPOSITION | MF_SEPARATOR, 0, PCWSTR::null())?;
 
             // "Send to" / "Open with" fill their submenus lazily and are owner-drawn: the
             // menu object has to see these messages, which arrive at our window.
@@ -88,6 +94,9 @@ mod imp {
                 let _ = RemoveWindowSubclass(hwnd, Some(forward_menu_messages), SUBCLASS_ID);
             }
 
+            if chosen.0 as u32 == ID_RENAME {
+                return Ok(true);
+            }
             if chosen.0 > 0 {
                 let info = CMINVOKECOMMANDINFO {
                     cbSize: size_of::<CMINVOKECOMMANDINFO>() as u32,
@@ -98,7 +107,7 @@ mod imp {
                 };
                 menu.InvokeCommand(&info)?;
             }
-            Ok(())
+            Ok(false)
         })();
         let _ = DestroyMenu(hmenu);
         result

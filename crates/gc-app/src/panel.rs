@@ -66,6 +66,8 @@ pub enum PanelAction {
     Open(PathBuf),
     /// A file inside an archive: extract it to the scratch folder, then use it.
     ArchiveFile { index: Arc<ArchiveIndex>, inner: String, mode: FileUse },
+    /// Context menu of a server item: rename it.
+    Rename,
     /// Open the FTP connection log (button, or after a failed connect).
     FtpLog,
     /// A file on an FTP server: download it to the scratch folder, then use it.
@@ -629,6 +631,11 @@ impl Panel {
         Some((v.conn.clone(), gc_ftp::remote_str(&e.path)))
     }
 
+    /// Full path and name of the entry under the cursor (not the `..` row).
+    pub fn cursor_entry(&self) -> Option<(PathBuf, String)> {
+        self.entries.get(self.cursor).filter(|e| e.name != PARENT).map(|e| (e.path.clone(), e.name.clone()))
+    }
+
     pub fn is_ftp(&self) -> bool {
         self.ftp.is_some()
     }
@@ -818,6 +825,10 @@ impl Panel {
                         resp.context_menu(|ui| {
                             if ui.button("Open (Enter)").clicked() {
                                 open = true;
+                                ui.close_menu();
+                            }
+                            if self.ftp.is_some() && ui.button("Rename (F2)").clicked() {
+                                self.action = Some(PanelAction::Rename);
                                 ui.close_menu();
                             }
                             if ui.button(if self.ftp.is_some() { "Copy to other panel (F5)" } else { "Extract to other panel (F5)" }).clicked() {
