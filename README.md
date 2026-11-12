@@ -2,7 +2,7 @@
 
 A fast, modern, dual-pane file manager written in Rust. It follows the Norton / Total / Midnight Commander tradition and aims to keep every feature of those three while improving on them.
 
-**Status:** v0.22.0, Windows (x64), actively developed. Also runs under WinPE.
+**Status:** v0.22.2, Windows (x64), actively developed. Also runs under WinPE.
 
 **Repo:** https://github.com/elmatkos/Ghost_Commander
 
@@ -112,7 +112,7 @@ Info > System Info (F9) shows a scrollable summary in the style of EFI Commander
 
 ## Tabs
 
-Each side has a tab strip above the drive buttons: click a tab to switch, `+` opens a new tab in the same folder, `x` or a middle click closes one. Keyboard: Ctrl+T new tab, Ctrl+W close, Ctrl+Tab / Ctrl+Shift+Tab next / previous tab of the active side. Both sides reopen their tabs (and the shown one) at the next start (`left_tabs`, `right_tabs`, `left_tab`, `right_tab` in `settings.toml`). The last tab of a side cannot be closed.
+Each side has a tab strip under the drive buttons, every tab in a thin frame: click a tab to switch, `+` opens a new tab in the same folder, the red square x on the active tab (or a middle click on any tab) closes it. Keyboard: Ctrl+T new tab, Ctrl+W close, Ctrl+Tab / Ctrl+Shift+Tab next / previous tab of the active side. Both sides reopen their tabs (and the shown one) at the next start (`left_tabs`, `right_tabs`, `left_tab`, `right_tab` in `settings.toml`). The last tab of a side cannot be closed.
 
 ## DISM manager
 
@@ -165,6 +165,8 @@ Live round trip test against a server: `GC_FTP_TEST_URL=ftp://user:pass@127.0.0.
 Both panels reopen the folders they showed when the app was closed (`left_dir`, `right_dir` in `settings.toml`; a folder that no longer exists falls back to the current folder). While a panel shows an archive or a server, the folder it was opened from is remembered.
 
 **Vanished drives (Config > Options > When a drive disappears):** by default a panel keeps showing the path of a removed drive (USB stick, share) and loads it again when it returns; the other choice (`switch_on_missing_drive = true`) jumps to the nearest existing parent folder or another drive (C: first).
+
+The window position, size and maximized state are remembered too (`win_pos`, `win_size`, `win_maximized` in `settings.toml`).
 
 ## Running under WinPE (v0.19.6+)
 

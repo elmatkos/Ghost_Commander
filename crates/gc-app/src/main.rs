@@ -96,6 +96,9 @@ struct App {
     /// Folders last written to settings (to notice a change and save the new ones).
     saved_dirs: [Vec<PathBuf>; 2],
     saved_cur: [usize; 2],
+    /// Window geometry last written to settings, and when it was last compared.
+    saved_win: Option<([i32; 2], [u32; 2], bool)>,
+    win_checked: std::time::Instant,
     /// The other tabs of each side (the shown one is `panels[i]`, at position `cur_tab[i]` in the strip).
     parked: [Vec<Panel>; 2],
     cur_tab: [usize; 2],
@@ -147,6 +150,8 @@ impl App {
             panels,
             saved_dirs: [Vec::new(), Vec::new()],
             saved_cur: [usize::MAX; 2],
+            saved_win: None,
+            win_checked: std::time::Instant::now(),
             parked: [lp, rp],
             cur_tab: [lc, rc],
             ftp_win: FtpWindow::default(),
@@ -284,6 +289,37 @@ impl App {
             let _ = theme::save_settings(&s);
             self.saved_dirs = dirs;
             self.saved_cur = self.cur_tab;
+        }
+    }
+
+    /// Remembers where the window is and how big it is (checked twice a second, written on change).
+    fn save_window_if_changed(&mut self, ctx: &egui::Context) {
+        if self.win_checked.elapsed() < Duration::from_millis(500) {
+            return;
+        }
+        self.win_checked = std::time::Instant::now();
+        let (outer, inner, maximized, minimized) = ctx.input(|i| {
+            let v = i.viewport();
+            (v.outer_rect, v.inner_rect, v.maximized.unwrap_or(false), v.minimized.unwrap_or(false))
+        });
+        let (Some(outer), Some(inner)) = (outer, inner) else { return };
+        if minimized || outer.min.x < -10_000.0 {
+            return; // a minimized window reports a fake position
+        }
+        let current = if maximized {
+            // keep the normal-state geometry we already have; only the flag changes
+            self.saved_win.map(|(p, sz, _)| (p, sz, true))
+        } else {
+            Some(([outer.min.x.round() as i32, outer.min.y.round() as i32], [inner.width().round() as u32, inner.height().round() as u32], false))
+        };
+        let Some(current) = current else { return };
+        if self.saved_win != Some(current) {
+            let mut s = theme::load_settings();
+            s.win_pos = Some(current.0);
+            s.win_size = Some(current.1);
+            s.win_maximized = current.2;
+            let _ = theme::save_settings(&s);
+            self.saved_win = Some(current);
         }
     }
 
@@ -1400,15 +1436,16 @@ impl App {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.columns(2, |cols| {
                 for (i, col) in cols.iter_mut().enumerate() {
-                    if let Some(c) = tabs::show(col, &self.side_titles(i), self.cur_tab[i], self.active == i) {
-                        tab_click = Some((i, c));
-                    }
                     if self.options.drive_buttons {
                         if let Some(c) = drive_bar::show(col, &drives, &self.panels[i].cwd, &self.themes.active, self.options.drive_free_bar) {
                             bar_click = Some((i, c));
                         }
                         col.add_space(2.0);
                     }
+                    if let Some(c) = tabs::show(col, &self.side_titles(i), self.cur_tab[i], self.active == i) {
+                        tab_click = Some((i, c));
+                    }
+                    col.add_space(2.0);
                     if self.panels[i].ui(col, &format!("panel{i}_{}", self.cur_tab[i]), self.active == i, &self.themes.active) {
                         clicked = Some(i);
                     }
@@ -1470,6 +1507,7 @@ impl App {
         }
         self.ftp_log.show(ctx);
         self.save_dirs_if_changed();
+        self.save_window_if_changed(ctx);
         self.viewer.show(ctx);
         if let Some(err) = self.images.show(ctx) {
             self.status = Some(err);
@@ -1618,11 +1656,21 @@ fn main() -> eframe::Result<()> {
             }
         }
     }
+    // Same place and size as last time (a position that is far off-screen is ignored).
+    let saved = theme::load_settings();
+    let mut viewport = egui::ViewportBuilder::default();
+    let size = saved.win_size.filter(|s| s[0] >= 400 && s[1] >= 300 && s[0] <= 10_000 && s[1] <= 10_000).map(|s| [s[0] as f32, s[1] as f32]).unwrap_or([1200.0, 700.0]);
+    if let Some(p) = saved.win_pos.filter(|p| p[0] > -3000 && p[1] > -3000 && p[0] < 10_000 && p[1] < 10_000) {
+        viewport = viewport.with_position([p[0] as f32, p[1] as f32]);
+    }
+    if saved.win_maximized {
+        viewport = viewport.with_maximized(true);
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
+        viewport: viewport
             .with_title(concat!("Ghost Commander v", env!("CARGO_PKG_VERSION")))
             .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icon_256.png")).expect("embedded icon is a valid PNG"))
-            .with_inner_size([1200.0, 700.0]),
+            .with_inner_size(size),
         ..Default::default()
     };
     log::log("starting eframe (OpenGL window)");

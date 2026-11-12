@@ -270,11 +270,15 @@ pub struct Settings {
     /// When the folder or drive a panel shows disappears (USB stick pulled): false = keep showing it
     /// and reload as soon as it is back, true = switch to the nearest existing folder / drive.
     pub switch_on_missing_drive: bool,
+    /// Window outer position, inner size (normal state, not maximized) and whether it was maximized.
+    pub win_pos: Option<[i32; 2]>,
+    pub win_size: Option<[u32; 2]>,
+    pub win_maximized: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { theme: None, drive_buttons: true, drive_free_bar: true, left_dir: None, right_dir: None, left_tabs: Vec::new(), right_tabs: Vec::new(), left_tab: 0, right_tab: 0, switch_on_missing_drive: false }
+        Self { theme: None, drive_buttons: true, drive_free_bar: true, left_dir: None, right_dir: None, left_tabs: Vec::new(), right_tabs: Vec::new(), left_tab: 0, right_tab: 0, switch_on_missing_drive: false, win_pos: None, win_size: None, win_maximized: false }
     }
 }
 
