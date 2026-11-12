@@ -21,6 +21,7 @@ use crate::syntax::{self, Lang, State};
 const MAX_BYTES: u64 = 2 * 1024 * 1024;
 const FONT_SIZE: f32 = 13.0;
 /// Inserted by the Tab key.
+static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 const TAB: &str = "    ";
 
 #[derive(Clone, Copy, PartialEq)]
@@ -70,6 +71,10 @@ struct Doc {
     confirm: bool,
     fresh: bool,
     pending_scroll: Option<f32>,
+    /// Distinguishes openings, so cursor and scroll position of an earlier file are not reused.
+    serial: u64,
+    scroll_y: f32,
+    page: f32,
 }
 
 fn hash(s: &str) -> u64 {
@@ -275,13 +280,16 @@ impl Editor {
             confirm: false,
             fresh: true,
             pending_scroll: None,
+            serial: SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            scroll_y: 0.0,
+            page: 400.0,
         });
         Ok(true)
     }
 
     pub fn show(&mut self, ctx: &egui::Context, dark: bool) {
         let Some(d) = &mut self.doc else { return };
-        let id = Id::new("editor_text");
+        let id = Id::new(("editor_text", d.serial));
         let row_h = ctx.fonts(|f| f.row_height(&FontId::monospace(FONT_SIZE)));
         let modified = d.modified();
 
@@ -308,6 +316,32 @@ impl Editor {
             set_selection(ctx, id, &d.text, a + TAB.len(), a + TAB.len());
         }
 
+        // PageUp / PageDown: TextEdit ignores them; move the cursor and the view by a page.
+        if ctx.memory(|m| m.has_focus(id)) {
+            let shift = ctx.input(|i| i.modifiers.shift);
+            let (down, up) = ctx.input_mut(|i| {
+                (i.consume_key(Modifiers::NONE, Key::PageDown) | i.consume_key(Modifiers::SHIFT, Key::PageDown), i.consume_key(Modifiers::NONE, Key::PageUp) | i.consume_key(Modifiers::SHIFT, Key::PageUp))
+            });
+            if down || up {
+                let rows = (((d.page / row_h) as isize) - 1).max(1);
+                let delta = if down { rows } else { -rows };
+                let mut st = TextEdit::load_state(ctx, id).unwrap_or_default();
+                let (cur, anchor) = st.cursor.char_range().map(|r| (r.primary.index, r.secondary.index)).unwrap_or((0, 0));
+                let b = byte_of(&d.text, cur);
+                let line = d.text[..b].matches('\n').count();
+                let col = d.text[..b].rsplit('\n').next().map(|l| l.chars().count()).unwrap_or(0);
+                let last = d.text.matches('\n').count();
+                let tl = (line as isize + delta).clamp(0, last as isize) as usize;
+                let start = if tl == 0 { 0 } else { d.text.match_indices('\n').nth(tl - 1).map(|(i, _)| i + 1).unwrap_or(0) };
+                let len = d.text[start..].split('\n').next().map(|l| l.chars().count()).unwrap_or(0);
+                let new = char_of(&d.text, start) + col.min(len);
+                let sec = if shift { anchor } else { new };
+                st.cursor.set_char_range(Some(CCursorRange::two(CCursor::new(sec), CCursor::new(new))));
+                st.store(ctx, id);
+                d.pending_scroll = Some((d.scroll_y + delta as f32 * row_h).max(0.0));
+            }
+        }
+
         let (line, col) = match TextEdit::load_state(ctx, id).and_then(|s| s.cursor.char_range()) {
             Some(r) => {
                 let b = byte_of(&d.text, r.primary.index);
@@ -317,6 +351,7 @@ impl Editor {
             None => (1, 1),
         };
         let mut page = 400.0;
+        let mut scroll_y = 0.0;
         let mut open = true;
         let title = format!("Edit: {}{}{}", d.name, d.lang.map(|l| format!("  [{}]", l.name())).unwrap_or_default(), if modified { "  *" } else { "" });
         egui::Window::new(title).id(Id::new("editor")).open(&mut open).default_size([920.0, 620.0]).show(ctx, |ui| {
@@ -378,7 +413,7 @@ impl Editor {
             }
             ui.separator();
 
-            let mut scroll = egui::ScrollArea::both().auto_shrink(false).id_salt("editor_scroll");
+            let mut scroll = egui::ScrollArea::both().auto_shrink(false).id_salt(("editor_scroll", d.serial));
             if let Some(y) = d.pending_scroll.take() {
                 scroll = scroll.vertical_scroll_offset(y);
             }
@@ -387,7 +422,7 @@ impl Editor {
             let plain = ui.visuals().text_color();
             let weak = ui.visuals().weak_text_color();
             let Doc { text, cache, lang, gutter, fresh, .. } = d;
-            scroll.show(ui, |ui| {
+            let out = scroll.show(ui, |ui| {
                 ui.horizontal_top(|ui| {
                     ui.spacing_mut().item_spacing.x = 8.0;
                     let n = text.matches('\n').count() + 1;
@@ -421,8 +456,10 @@ impl Editor {
                     }
                 });
             });
+            scroll_y = out.state.offset.y;
         });
-        let _ = page;
+        d.page = page;
+        d.scroll_y = scroll_y;
         if !open {
             want_close = true;
         }
