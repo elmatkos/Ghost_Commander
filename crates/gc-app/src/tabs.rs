@@ -43,7 +43,7 @@ pub fn show(ui: &mut egui::Ui, titles: &[String], cur: usize, side_active: bool)
                 if active {
                     text = text.strong();
                 }
-                let r = ui.add(egui::Label::new(text).sense(Sense::click())).on_hover_text("Click: switch  |  middle click: close  |  Ctrl+T new, Ctrl+W close, Ctrl+Tab next");
+                let r = ui.add(egui::Label::new(text).selectable(false).sense(Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Click: switch  |  middle click: close  |  Ctrl+T new, Ctrl+W close, Ctrl+Tab next");
                 if r.clicked() {
                     out = Some(TabClick::Select(k));
                 }
