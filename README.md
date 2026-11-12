@@ -2,7 +2,7 @@
 
 A fast, modern, dual-pane file manager written in Rust. It follows the Norton / Total / Midnight Commander tradition and aims to keep every feature of those three while improving on them.
 
-**Status:** v0.22.3, Windows (x64), actively developed. Also runs under WinPE.
+**Status:** v0.23.0, Windows (x64), actively developed. Also runs under WinPE.
 
 **Repo:** https://github.com/elmatkos/Ghost_Commander
 
@@ -112,7 +112,7 @@ Info > System Info (F9) shows a scrollable summary in the style of EFI Commander
 
 ## Tabs
 
-Each side has a tab strip under the drive buttons, every tab in a thin frame: click a tab to switch, `+` opens a new tab in the same folder, the red square x on the active tab (or a middle click on any tab) closes it. Keyboard: Ctrl+T new tab, Ctrl+W close, Ctrl+Tab / Ctrl+Shift+Tab next / previous tab of the active side. Both sides reopen their tabs (and the shown one) at the next start (`left_tabs`, `right_tabs`, `left_tab`, `right_tab` in `settings.toml`). The last tab of a side cannot be closed.
+Each side has a tab strip under the drive buttons, every tab in a thin frame: click a tab to switch, `+` opens a new tab in the same folder, the red square x on the active tab (or a middle click on any tab) closes it. Keyboard: Ctrl+T new tab, Ctrl+W close, Ctrl+Tab / Ctrl+Shift+Tab next / previous tab of the active side. Both sides reopen their tabs (and the shown one) at the next start (`left_tabs`, `right_tabs`, `left_tab`, `right_tab` in `settings.toml`). The last tab of a side cannot be closed. **Locked tabs**: Ctrl+L or right click a tab > Lock. A locked tab has an orange frame and a lock icon and keeps its folder: when you go anywhere else in it (Enter, Backspace, drive buttons, `cd`, opening an archive or a server), that place opens in a new tab next to it and the locked tab shows its folder again. Locks are remembered (a `*` before the folder in `left_tabs` / `right_tabs`).
 
 ## DISM manager
 

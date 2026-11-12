@@ -89,6 +89,8 @@ pub struct Panel {
     ftp_failed: bool,
     /// Set by the app from Config > Options: leave a vanished folder / drive for an existing one.
     pub switch_on_missing: bool,
+    /// Locked tab: the folder it is fixed to. Going anywhere else opens a new tab instead.
+    pub locked: Option<PathBuf>,
     select_next: Option<String>,
     ctx: egui::Context,
     pub action: Option<PanelAction>,
@@ -121,6 +123,7 @@ impl Panel {
             ftp_work: None,
             ftp_failed: false,
             switch_on_missing: false,
+            locked: None,
             select_next: None,
             ctx,
             action: None,
@@ -543,6 +546,18 @@ impl Panel {
     /// Puts the cursor on `name` once the next listing of a server folder arrives (e.g. a folder just created).
     pub fn select_after_reload(&mut self, name: &str) {
         self.select_next = Some(name.to_owned());
+    }
+
+    pub fn in_archive(&self) -> bool {
+        self.archive.is_some() || self.loading.is_some()
+    }
+
+    /// What is saved for this tab: its folder, with a `*` in front when the tab is locked.
+    pub fn tab_state(&self) -> String {
+        match &self.locked {
+            Some(d) => format!("*{}", d.display()),
+            None => self.restore_dir().display().to_string(),
+        }
     }
 
     /// Short name for the tab strip.

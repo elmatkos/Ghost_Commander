@@ -35,6 +35,7 @@ const GROUPS: [(&str, &[(&str, &str)]); 10] = [
             ("Ctrl+H", "Checksums: CRC-32, MD5, SHA-1, SHA-256 (and Save .crc)"),
             ("Ctrl+1 / Ctrl+2", "Pick a drive for the left / right panel"),
             ("Ctrl+T / Ctrl+W", "New tab (same folder) / close the tab"),
+            ("Ctrl+L", "Lock / unlock the tab: a locked tab keeps its folder, going elsewhere opens a new tab"),
             ("Ctrl+Tab / Ctrl+Shift+Tab", "Next / previous tab of the active side"),
             ("Ctrl+D", "DISM manager: mount a WIM, commit / unmount"),
             ("Ctrl+N", "FTP connect: paste a link (ftp://user:password@host/dir) or pick a saved session"),
@@ -76,7 +77,8 @@ const GROUPS: [(&str, &[(&str, &str)]); 10] = [
         "Tabs",
         &[
             ("+ / click / middle click", "Open a tab / switch / close (the strip above each panel)"),
-            ("Remembered", "Both sides reopen their tabs and the shown one at the next start"),
+            ("Right click a tab", "Lock (orange frame and lock icon; leaving its folder opens a new tab) / close"),
+            ("Remembered", "Both sides reopen their tabs, locks and the shown tab at the next start"),
         ],
     ),
     (

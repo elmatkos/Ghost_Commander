@@ -94,7 +94,7 @@ struct App {
     cmd_history: Vec<String>,
     cmd_pos: Option<usize>,
     /// Folders last written to settings (to notice a change and save the new ones).
-    saved_dirs: [Vec<PathBuf>; 2],
+    saved_dirs: [Vec<String>; 2],
     saved_cur: [usize; 2],
     /// Window geometry last written to settings, and when it was last compared.
     saved_win: Option<([i32; 2], [u32; 2], bool)>,
@@ -120,15 +120,19 @@ impl App {
         let saved = theme::load_settings();
         let remembered = |d: &Option<String>| d.as_ref().map(PathBuf::from).filter(|p| p.is_dir()).unwrap_or_else(|| start.clone());
         let build = |tabs: &[String], single: &Option<String>, cur: usize| -> (Panel, Vec<Panel>, usize) {
-            let mut dirs: Vec<PathBuf> = tabs.iter().map(PathBuf::from).filter(|p| p.is_dir()).collect();
+            // A leading `*` marks a locked tab.
+            let mut dirs: Vec<(PathBuf, bool)> = tabs.iter().map(|t| (PathBuf::from(t.trim_start_matches('*')), t.starts_with('*'))).filter(|(p, _)| p.is_dir()).collect();
             if dirs.is_empty() {
-                dirs.push(remembered(single));
+                dirs.push((remembered(single), false));
             }
             let cur = cur.min(dirs.len() - 1);
             let mut live = None;
             let mut parked = Vec::new();
             for (k, d) in dirs.into_iter().enumerate() {
-                let panel = Panel::new(d, cc.egui_ctx.clone());
+                let mut panel = Panel::new(d.0.clone(), cc.egui_ctx.clone());
+                if d.1 {
+                    panel.locked = Some(d.0);
+                }
                 if k == cur {
                     live = Some(panel);
                 } else {
@@ -276,14 +280,13 @@ impl App {
 
     /// Remembers the folders of both panels for the next start.
     fn save_dirs_if_changed(&mut self) {
-        let dirs = [self.side_dirs(0), self.side_dirs(1)];
+        let dirs = [self.side_state(0), self.side_state(1)];
         if dirs != self.saved_dirs || self.cur_tab != self.saved_cur {
             let mut s = theme::load_settings();
-            let text = |v: &[PathBuf]| v.iter().map(|d| d.display().to_string()).collect::<Vec<_>>();
             s.left_dir = Some(self.panels[0].restore_dir().display().to_string());
             s.right_dir = Some(self.panels[1].restore_dir().display().to_string());
-            s.left_tabs = text(&dirs[0]);
-            s.right_tabs = text(&dirs[1]);
+            s.left_tabs = dirs[0].clone();
+            s.right_tabs = dirs[1].clone();
             s.left_tab = self.cur_tab[0];
             s.right_tab = self.cur_tab[1];
             let _ = theme::save_settings(&s);
@@ -324,16 +327,48 @@ impl App {
     }
 
     /// Folders of all tabs of a side, in strip order.
-    fn side_dirs(&self, i: usize) -> Vec<PathBuf> {
-        let mut v: Vec<PathBuf> = self.parked[i].iter().map(Panel::restore_dir).collect();
-        v.insert(self.cur_tab[i].min(v.len()), self.panels[i].restore_dir());
+    fn side_state(&self, i: usize) -> Vec<String> {
+        let mut v: Vec<String> = self.parked[i].iter().map(Panel::tab_state).collect();
+        v.insert(self.cur_tab[i].min(v.len()), self.panels[i].tab_state());
         v
     }
 
-    fn side_titles(&self, i: usize) -> Vec<String> {
-        let mut v: Vec<String> = self.parked[i].iter().map(Panel::tab_title).collect();
-        v.insert(self.cur_tab[i].min(v.len()), self.panels[i].tab_title());
+    /// Tab names with their lock state.
+    fn side_titles(&self, i: usize) -> Vec<(String, bool)> {
+        let mut v: Vec<(String, bool)> = self.parked[i].iter().map(|p| (p.tab_title(), p.locked.is_some())).collect();
+        v.insert(self.cur_tab[i].min(v.len()), (self.panels[i].tab_title(), self.panels[i].locked.is_some()));
         v
+    }
+
+    /// Locks the shown tab of a side to its folder, or unlocks it.
+    fn toggle_lock(&mut self, i: usize) {
+        if self.panels[i].locked.is_some() {
+            self.panels[i].locked = None;
+        } else if let Some(dir) = self.panels[i].disk_folder().map(Path::to_path_buf) {
+            self.panels[i].locked = Some(dir);
+        } else {
+            self.status = Some("Only a tab showing a folder on a disk can be locked.".into());
+        }
+    }
+
+    /// A locked tab never changes folder: when it did (Enter, Backspace, a drive button, cd, an archive,
+    /// a server, ...), the new place moves to a new tab and the locked tab shows its folder again.
+    fn enforce_locks(&mut self, ctx: &egui::Context) {
+        for i in 0..2 {
+            let Some(dir) = self.panels[i].locked.clone() else { continue };
+            let p = &self.panels[i];
+            let moved = p.is_ftp() || p.in_archive() || !p.cwd.display().to_string().eq_ignore_ascii_case(&dir.display().to_string());
+            if !moved {
+                continue;
+            }
+            let mut fresh = Panel::new(dir.clone(), ctx.clone());
+            fresh.locked = Some(dir);
+            let mut nav = std::mem::replace(&mut self.panels[i], fresh);
+            nav.locked = None;
+            let locked_panel = std::mem::replace(&mut self.panels[i], nav);
+            self.parked[i].insert(self.cur_tab[i], locked_panel);
+            self.cur_tab[i] += 1;
+        }
     }
 
     /// Opens a tab next to the current one, showing the same folder, and switches to it.
@@ -696,6 +731,9 @@ impl App {
             }
             if pressed(ctx, Key::W) {
                 self.close_tab(self.active);
+            }
+            if pressed(ctx, Key::L) {
+                self.toggle_lock(self.active);
             }
             if pressed(ctx, Key::Tab) {
                 let back = ctx.input(|i| i.modifiers.shift);
@@ -1464,6 +1502,10 @@ impl App {
                     self.switch_tab(i, k);
                     self.close_tab(i);
                 }
+                tabs::TabClick::Lock(k) => {
+                    self.switch_tab(i, k);
+                    self.toggle_lock(i);
+                }
                 tabs::TabClick::New => self.new_tab(i, ctx),
             }
         }
@@ -1480,6 +1522,7 @@ impl App {
             }
         }
         self.handle_panel_actions(ctx, frame);
+        self.enforce_locks(ctx);
         self.poll_extractions(ctx);
 
         step("panel actions handled");
