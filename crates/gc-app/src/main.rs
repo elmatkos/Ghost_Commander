@@ -8,6 +8,7 @@ mod drive_bar;
 mod ftp_window;
 mod help_window;
 mod options;
+mod editor;
 mod image_viewer;
 mod log;
 mod panel;
@@ -38,6 +39,7 @@ use checksums_window::ChecksumsWindow;
 use verify_window::VerifyWindow;
 use sysinfo_window::SysInfoWindow;
 use theme_editor::ThemeManager;
+use editor::Editor;
 use image_viewer::ImageViewer;
 use viewer::Viewer;
 
@@ -106,6 +108,7 @@ struct App {
     /// Drive list with free space, refreshed by a background thread (a dead network drive can block).
     drives: Arc<std::sync::Mutex<Vec<gc_core::DriveInfo>>>,
     viewer: Viewer,
+    editor: Editor,
     images: ImageViewer,
     /// Archive files being extracted for F3 / F4 / Enter, with what to do when ready.
     extractions: Vec<(std::sync::mpsc::Receiver<std::io::Result<PathBuf>>, FileUse)>,
@@ -185,6 +188,7 @@ impl App {
             verify: VerifyWindow::default(),
             drives: watch_drives(&cc.egui_ctx),
             viewer: Viewer::default(),
+            editor: Editor::default(),
             images: ImageViewer::default(),
             extractions: Vec::new(),
         }
@@ -211,13 +215,18 @@ impl App {
     fn use_file(&mut self, ctx: &egui::Context, file: PathBuf, mode: FileUse, siblings: Vec<PathBuf>) {
         self.status = None;
         let result = match mode {
-            FileUse::Edit => {
+            FileUse::Edit => match self.editor.open(&file) {
+                Ok(true) => Ok(()),
+                Err(e) => Err(e),
+                // Too big, binary or an unusual encoding: leave it to the system editor.
+                Ok(false) => {
                 #[cfg(windows)]
                 let editor = "notepad";
                 #[cfg(not(windows))]
                 let editor = "xdg-open";
                 std::process::Command::new(editor).arg(&file).spawn().map(|_| ())
-            }
+                }
+            },
             FileUse::View if image_viewer::is_image(&file) => {
                 self.images.open(ctx, &file, siblings);
                 Ok(())
@@ -1373,6 +1382,7 @@ impl App {
             || self.ftp_win.open
             || self.dism.open
             || self.viewer.is_open()
+            || self.editor.is_open()
             || self.jobs.iter().any(|j| j.job.progress.pending_conflict().is_some());
         if !dialog_open {
             self.handle_keys(ctx);
@@ -1553,6 +1563,7 @@ impl App {
         self.save_dirs_if_changed();
         self.save_window_if_changed(ctx);
         self.viewer.show(ctx, self.themes.active.dark);
+        self.editor.show(ctx, self.themes.active.dark);
         if let Some(err) = self.images.show(ctx) {
             self.status = Some(err);
         }

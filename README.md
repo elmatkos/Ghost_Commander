@@ -2,7 +2,7 @@
 
 A fast, modern, dual-pane file manager written in Rust. It follows the Norton / Total / Midnight Commander tradition and aims to keep every feature of those three while improving on them.
 
-**Status:** v0.24.1, Windows (x64), actively developed. Also runs under WinPE.
+**Status:** v0.25.0, Windows (x64), actively developed. Also runs under WinPE.
 
 **Repo:** https://github.com/elmatkos/Ghost_Commander
 
@@ -100,7 +100,7 @@ Enter on any other file opens it with its Windows default program (pictures in t
 
 ## Context menu and Delete
 
-Right click on files or folders on disk shows the real Windows Explorer menu (Open with, Send to, 7-Zip, Properties, ...); a right click on an unmarked row acts on that row only, on a marked row on all marked. Inside archives a small built-in menu offers Open and Extract. `Del` / `Shift+Del` work like F8 / Shift+F8. F3 opens a read-only text viewer (first 8 MB; scrolls with the mouse wheel and with Up/Down, PgUp/PgDn or Space, Home/End, Left/Right; source files are syntax-coloured: C, C++ (`.c .h .cpp .cc .cxx .hpp ...`), C# (`.cs`), PowerShell (`.ps1 .psm1 .psd1`), Rust and Python, by a small built-in highlighter in `syntax.rs` that colours only the rows on screen, with block comments, here-strings and verbatim strings carried across lines, light and dark colour sets; also for files inside archives, which are extracted to a scratch folder first, as for F4 and Enter), or the image viewer for png, jpg, gif, bmp, webp and ico (own window: native size if it fits the monitor, otherwise scaled to 75% of the monitor height; Left/Right browse the folder's images, `+` / `-` zoom, `0` resets, drag pans; Esc, Q or F3 closes it), F4 opens the file in Notepad.
+Right click on files or folders on disk shows the real Windows Explorer menu (Open with, Send to, 7-Zip, Properties, ...); a right click on an unmarked row acts on that row only, on a marked row on all marked. Inside archives a small built-in menu offers Open and Extract. `Del` / `Shift+Del` work like F8 / Shift+F8. F3 opens a read-only text viewer (first 8 MB; scrolls with the mouse wheel and with Up/Down, PgUp/PgDn or Space, Home/End, Left/Right; source files are syntax-coloured: C, C++ (`.c .h .cpp .cc .cxx .hpp ...`), C# (`.cs`), PowerShell (`.ps1 .psm1 .psd1`), Rust and Python, by a small built-in highlighter in `syntax.rs` that colours only the rows on screen, with block comments, here-strings and verbatim strings carried across lines, light and dark colour sets; also for files inside archives, which are extracted to a scratch folder first, as for F4 and Enter), or the image viewer for png, jpg, gif, bmp, webp and ico (own window: native size if it fits the monitor, otherwise scaled to 75% of the monitor height; Left/Right browse the folder's images, `+` / `-` zoom, `0` resets, drag pans; Esc, Q or F3 closes it), F4 opens the built-in editor (`editor.rs`): the same syntax colours, line numbers, Tab inserts spaces, Ctrl+S saves, Ctrl+F opens find / replace (F3 = next, match case option, replace all), Esc closes (asks when the file has unsaved changes); it keeps the file's encoding (UTF-8, UTF-8 with BOM, UTF-16 with BOM) and line endings (LF / CRLF). Files over 2 MB, binary files and other encodings open in Notepad instead.
 
 ## Menu, drive buttons and status line
 
