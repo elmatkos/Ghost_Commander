@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/gc-core", "crates/gc-archive", "crates/gc-sysinfo", "crates/gc-ftp", "crates/gc-dism", "crates/gc-app"]
 
 [workspace.package]
-version = "0.24.0"
+version = "0.24.1"
 authors = ["Martin Balaj"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/elmatkos/Ghost_Commander"
