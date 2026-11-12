@@ -13,6 +13,7 @@ mod log;
 mod panel;
 mod shell_menu;
 mod sysinfo_window;
+mod syntax;
 mod tabs;
 mod theme;
 mod theme_editor;
@@ -1551,7 +1552,7 @@ impl App {
         self.ftp_log.show(ctx);
         self.save_dirs_if_changed();
         self.save_window_if_changed(ctx);
-        self.viewer.show(ctx);
+        self.viewer.show(ctx, self.themes.active.dark);
         if let Some(err) = self.images.show(ctx) {
             self.status = Some(err);
         }

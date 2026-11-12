@@ -10,7 +10,7 @@ const GROUPS: [(&str, &[(&str, &str)]); 10] = [
         &[
             ("F1", "This help"),
             ("F2", "Rename the item under the cursor (name and extension; also right click > Rename)"),
-            ("F3", "View (text viewer, image viewer for pictures)"),
+            ("F3", "View (text viewer with syntax colors for C, C++, C#, PowerShell, Rust and Python; image viewer for pictures)"),
             ("F4", "Edit in Notepad"),
             ("F5", "Copy to the other panel (from an archive: extract); the dialog lets you edit the target path and, for one item, the new name"),
             ("F6", "Move to the other panel; same editable dialog (move to the same folder with a new name = rename)"),
