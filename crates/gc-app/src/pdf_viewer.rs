@@ -226,7 +226,7 @@ fn draw(doc: &mut Doc, ui: &mut egui::Ui, fresh: bool) -> bool {
         let max_y = (doc.content_h - doc.view_h).max(0.0);
         let chain = crate::prefs::pdf_turn_pages();
         if up {
-            if chain && doc.scroll.y <= 1.0 && doc.cur > 0 {
+            if chain && doc.scroll.y <= 2.0 && doc.cur > 0 {
                 doc.set_page(doc.cur - 1);
                 doc.scroll.y = f32::MAX;
             } else {
@@ -234,21 +234,21 @@ fn draw(doc: &mut Doc, ui: &mut egui::Ui, fresh: bool) -> bool {
             }
         }
         if down {
-            if chain && doc.scroll.y >= max_y - 1.0 && doc.cur + 1 < pages {
+            if chain && doc.scroll.y >= max_y - 2.0 && doc.cur + 1 < pages {
                 doc.set_page(doc.cur + 1);
             } else {
                 doc.scroll.y = (doc.scroll.y + 60.0).min(max_y);
             }
         }
         if pgdn {
-            if doc.scroll.y >= max_y - 1.0 && doc.cur + 1 < pages {
+            if doc.scroll.y >= max_y - 2.0 && doc.cur + 1 < pages {
                 doc.set_page(doc.cur + 1);
             } else {
                 doc.scroll.y = (doc.scroll.y + doc.view_h - 40.0).min(max_y);
             }
         }
         if pgup {
-            if doc.scroll.y <= 1.0 && doc.cur > 0 {
+            if doc.scroll.y <= 2.0 && doc.cur > 0 {
                 doc.set_page(doc.cur - 1);
                 doc.scroll.y = f32::MAX;
             } else {
@@ -342,7 +342,7 @@ fn draw(doc: &mut Doc, ui: &mut egui::Ui, fresh: bool) -> bool {
             0.0
         }
     });
-    doc.content_h = out.inner;
+    doc.content_h = out.content_size.y;
     doc.view_h = out.inner_rect.height();
     doc.scroll = out.state.offset;
     close
