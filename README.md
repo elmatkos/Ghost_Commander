@@ -56,6 +56,7 @@ Dual panes, keyboard navigation (arrows, PgUp/PgDn, Home/End, Tab, Enter, Backsp
 Branding lives in `assets/` (`icon.ico` is embedded into the exe by `crates/gc-app/build.rs`, `logo_512.png` is shown in the About window, Help > About).
 
 ## TODO (backlog)
+- Syntax highlighting for UEFI Shell scripts (`.nsh`) and for log files (`.log`: timestamps, levels such as ERROR / WARN / INFO, paths, hex numbers, GUIDs) in the viewer and the editor.
 - Editor: open the viewer side by side with the editor (Ctrl+F3 or a button) with a file picker, so code can be browsed and copied from another file into the one being edited.
 - FTP: implicit FTPS (port 990), SFTP, upload back after F4 on a server file, server-to-server copy, transfers in parallel with browsing (a transfer currently holds the connection).
 - Verify v0.19.0 copy: measure parallel file counts (1/2/4/8/16), test copies between C: D: F: G:, check how parallel copying looks in the GUI.
