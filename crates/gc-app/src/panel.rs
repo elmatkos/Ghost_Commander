@@ -372,6 +372,13 @@ impl Panel {
         self.reload();
     }
 
+    /// Shows the folder of `file` and puts the cursor on it.
+    pub fn go_to_file(&mut self, file: &Path) {
+        if let Some(dir) = file.parent() {
+            self.go_to(dir.to_path_buf(), file.file_name().map(|n| n.to_string_lossy().into_owned()));
+        }
+    }
+
     /// Switches to another root (e.g. a drive).
     pub fn open_root(&mut self, path: PathBuf) {
         self.go_to(path, None);

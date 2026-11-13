@@ -188,6 +188,11 @@ fn nt_time(ticks: u64) -> Option<SystemTime> {
 }
 
 impl ArchiveIndex {
+    /// Every entry as (inner path, is folder, size) - for searching.
+    pub fn entry_list(&self) -> Vec<(String, bool, u64)> {
+        self.entries.iter().map(|e| (e.path.clone(), e.is_dir, e.size)).collect()
+    }
+
     /// Direct children of `dir` (`""` is the archive root). Folders that only exist
     /// implicitly (as a prefix of a file path) are listed too.
     pub fn list(&self, dir: &str) -> Vec<Entry> {

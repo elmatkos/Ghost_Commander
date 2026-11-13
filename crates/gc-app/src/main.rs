@@ -10,6 +10,7 @@ mod ftp_window;
 mod help_window;
 mod options;
 mod prefs;
+mod search_window;
 mod editor;
 mod evtx_viewer;
 mod filedialog;
@@ -43,6 +44,7 @@ use gc_archive::{ArchiveIndex, PackFormat};
 use panel::{FileUse, Panel, PanelAction, SortKey};
 use options::Options;
 use checksums_window::ChecksumsWindow;
+use search_window::SearchWindow;
 use verify_window::VerifyWindow;
 use sysinfo_window::SysInfoWindow;
 use theme_editor::ThemeManager;
@@ -95,6 +97,7 @@ struct App {
     options: Options,
     sysinfo: SysInfoWindow,
     checksums: ChecksumsWindow,
+    search: SearchWindow,
     verify: VerifyWindow,
     ftp_win: FtpWindow,
     ftp_log: FtpLogWindow,
@@ -196,6 +199,7 @@ impl App {
             options: Options::load(),
             sysinfo: SysInfoWindow::default(),
             checksums: ChecksumsWindow::default(),
+            search: SearchWindow::default(),
             verify: VerifyWindow::default(),
             drives: watch_drives(&cc.egui_ctx),
             viewer: Viewer::default(),
@@ -661,6 +665,32 @@ impl App {
         }
     }
 
+    /// Alt+F7: search, starting in the folder the active panel shows.
+    fn open_search(&mut self) {
+        let panel = &self.panels[self.active];
+        let dir = panel.disk_folder().map(Path::to_path_buf).or_else(|| panel.cwd.parent().map(Path::to_path_buf)).unwrap_or_else(|| PathBuf::from("C:\\"));
+        self.search.open_in(&dir);
+    }
+
+    /// What the user asked for in the search window: show a hit in the panel, view it or edit it.
+    fn handle_search_action(&mut self, ctx: &egui::Context) {
+        let Some((action, hit)) = self.search.take_action() else { return };
+        match (action, &hit.inner) {
+            (search_window::Action::Goto, _) => self.panels[self.active].go_to_file(&hit.path),
+            (act, None) => {
+                let mode = if act == search_window::Action::Edit { FileUse::Edit } else { FileUse::View };
+                self.use_file(ctx, hit.path.clone(), mode, Vec::new());
+            }
+            (act, Some(inner)) => match gc_archive::open(&hit.path) {
+                Ok(index) => {
+                    let mode = if act == search_window::Action::Edit { FileUse::Edit } else { FileUse::View };
+                    self.extract_then_use(ctx, Arc::new(index), inner.clone(), mode);
+                }
+                Err(e) => self.status = Some(format!("{}: {e}", hit.path.display())),
+            },
+        }
+    }
+
     /// Ctrl+H: checksums of the marked files (or the one under the cursor). Folders are skipped.
     fn open_checksums(&mut self, ctx: &egui::Context) {
         let panel = &self.panels[self.active];
@@ -816,8 +846,11 @@ impl App {
         if pressed(ctx, Key::F2) && !alt && !ctrl && !shift {
             self.open_rename();
         }
+        if alt && !ctrl && !shift && pressed(ctx, Key::F7) {
+            self.open_search();
+        }
         for key in [Key::F5, Key::F6, Key::F7, Key::F8] {
-            if pressed(ctx, key) && !ctrl {
+            if pressed(ctx, key) && !ctrl && !(alt && key == Key::F7) {
                 if alt && key == Key::F5 {
                     self.open_pack_dialog();
                 } else if shift && key == Key::F6 {
@@ -1399,6 +1432,7 @@ impl App {
             || self.options.open
             || self.sysinfo.open
             || self.checksums.open
+            || self.search.open
             || self.verify.open
             || self.ftp_win.open
             || self.dism.open
@@ -1450,6 +1484,10 @@ impl App {
                     }
                     if ui.button("Checksums...  (Ctrl+H)").clicked() {
                         self.open_checksums(ctx);
+                        ui.close_menu();
+                    }
+                    if ui.button("Search...  (Alt+F7)").clicked() {
+                        self.open_search();
                         ui.close_menu();
                     }
                 });
@@ -1577,6 +1615,8 @@ impl App {
         }
         self.sysinfo.show(ctx, &self.themes.active);
         self.checksums.show(ctx, &self.themes.active);
+        self.search.show(ctx);
+        self.handle_search_action(ctx);
         self.verify.show(ctx, &self.themes.active);
         if let Some(target) = self.ftp_win.show(ctx) {
             self.status = None;
