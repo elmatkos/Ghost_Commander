@@ -40,6 +40,11 @@ const CP1250: [char; 128] = [
     '\u{0111}', '\u{0144}', '\u{0148}', '\u{F3}', '\u{F4}', '\u{0151}', '\u{F6}', '\u{F7}', '\u{0159}', '\u{016F}', '\u{FA}', '\u{0171}', '\u{FC}', '\u{FD}', '\u{0163}', '\u{02D9}',
 ];
 
+/// The character of byte `b` in Windows-1250.
+pub fn cp1250_char(b: u8) -> char {
+    if b < 0x80 { b as char } else { CP1250[b as usize - 0x80] }
+}
+
 fn cp1250_reverse() -> &'static HashMap<char, u8> {
     static MAP: OnceLock<HashMap<char, u8>> = OnceLock::new();
     MAP.get_or_init(|| CP1250.iter().enumerate().map(|(i, &c)| (c, 0x80 + i as u8)).collect())

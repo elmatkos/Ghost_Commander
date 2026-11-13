@@ -9,6 +9,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use eframe::egui::{self, text::LayoutJob, Color32, FontId, Key, Pos2, Rect, TextFormat, Vec2};
 
+use crate::doctext;
 use crate::fullscreen::Link;
 use crate::syntax::{self, Kind, Lang, State};
 use crate::textenc::{self, Enc};
@@ -498,11 +499,18 @@ pub fn load(path: &Path) -> std::io::Result<Doc> {
         file.take(MAX_BYTES).read_to_end(&mut bytes)?;
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let mut title = if total > MAX_BYTES { format!("{name} (first {} MB)", MAX_BYTES >> 20) } else { name };
-        let decoded = textenc::decode(&bytes);
+        let doc_text = doctext::extract(path);
+        let decoded = match &doc_text {
+            Some((text, fmt)) => {
+                title = format!("{title}  ({fmt} text)");
+                Some((text.clone(), Enc::Utf8))
+            }
+            None => textenc::decode(&bytes),
+        };
         let (lines, lang, starts, text_ok) = match &decoded {
             Some((text, enc)) => {
                 let lines: Vec<String> = text.lines().map(|l| l.replace('\t', "    ")).collect();
-                let lang = syntax::detect(path);
+                let lang = if doc_text.is_some() { Some(Lang::Markdown) } else { syntax::detect(path) };
                 let starts = lang.map(|l| syntax::line_states(l, lines.iter().map(String::as_str))).unwrap_or_default();
                 if let Some(l) = lang {
                     title = format!("{title}  [{}]", l.name());

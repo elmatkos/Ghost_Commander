@@ -4,6 +4,7 @@
 mod about;
 mod checksums_window;
 mod dism_window;
+mod doctext;
 mod drive_bar;
 mod ftp_window;
 mod help_window;

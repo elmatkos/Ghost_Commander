@@ -23,6 +23,8 @@ gc-ftp = { path = "../gc-ftp" }
 gc-dism = { path = "../gc-dism" }
 raw-window-handle = "0.6"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp", "ico"] }
+evtx = { version = "0.15.1", default-features = false }
+zip = { version = "9.1.3", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
@@ -40,5 +42,3 @@ windows = { version = "0.58", features = [
 [build-dependencies]
 winresource = "0.1"
 
-[dev-dependencies]
-zip = { version = "9.1.3", default-features = false, features = ["deflate"] }
