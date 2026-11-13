@@ -17,6 +17,7 @@ mod fullscreen;
 mod image_viewer;
 mod log;
 mod panel;
+mod pdf_viewer;
 mod shell_menu;
 mod sysinfo_window;
 mod syntax;
@@ -47,6 +48,7 @@ use sysinfo_window::SysInfoWindow;
 use theme_editor::ThemeManager;
 use editor::Editor;
 use evtx_viewer::EvtxViewer;
+use pdf_viewer::PdfViewer;
 use image_viewer::ImageViewer;
 use viewer::Viewer;
 
@@ -117,6 +119,7 @@ struct App {
     viewer: Viewer,
     editor: Editor,
     evtx: EvtxViewer,
+    pdf: PdfViewer,
     images: ImageViewer,
     /// Archive files being extracted for F3 / F4 / Enter, with what to do when ready.
     extractions: Vec<(std::sync::mpsc::Receiver<std::io::Result<PathBuf>>, FileUse)>,
@@ -198,6 +201,7 @@ impl App {
             viewer: Viewer::default(),
             editor: Editor::default(),
             evtx: EvtxViewer::default(),
+            pdf: PdfViewer::default(),
             images: ImageViewer::default(),
             extractions: Vec::new(),
         }
@@ -242,6 +246,10 @@ impl App {
             }
             FileUse::View if file.extension().is_some_and(|e| e.eq_ignore_ascii_case("evtx")) => {
                 self.evtx.open(ctx, &file);
+                Ok(())
+            }
+            FileUse::View if file.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf")) => {
+                self.pdf.open(ctx, &file);
                 Ok(())
             }
             FileUse::View => self.viewer.open(&file),
@@ -1397,6 +1405,7 @@ impl App {
             || self.viewer.is_open()
             || self.editor.is_open()
             || self.evtx.is_open()
+            || self.pdf.is_open()
             || self.jobs.iter().any(|j| j.job.progress.pending_conflict().is_some());
         if !dialog_open {
             self.handle_keys(ctx);
@@ -1579,6 +1588,7 @@ impl App {
         self.viewer.show(ctx, self.themes.active.dark);
         self.editor.show(ctx, self.themes.active.dark);
         self.evtx.show(ctx, self.themes.active.dark);
+        self.pdf.show(ctx);
         if let Some(err) = self.images.show(ctx) {
             self.status = Some(err);
         }
