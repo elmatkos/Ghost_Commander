@@ -26,8 +26,8 @@ pub struct Viewer {
     link: Link,
 }
 
-struct Doc {
-    title: String,
+pub struct Doc {
+    pub title: String,
     bytes: Vec<u8>,
     /// Text lines (empty for a binary file).
     lines: Vec<String>,
@@ -155,54 +155,9 @@ impl Viewer {
         self.open.is_some()
     }
 
-    /// Loads `path` into the viewer. Text is decoded (UTF-8, UTF-16 with BOM, else Windows-1250);
-    /// a file with NUL bytes opens as a hex dump.
+    /// Opens `path` in the viewer window.
     pub fn open(&mut self, path: &Path) -> std::io::Result<()> {
-        let mut bytes = Vec::new();
-        let file = std::fs::File::open(path)?;
-        let total = file.metadata()?.len();
-        file.take(MAX_BYTES).read_to_end(&mut bytes)?;
-        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let mut title = if total > MAX_BYTES { format!("{name} (first {} MB)", MAX_BYTES >> 20) } else { name };
-        let decoded = textenc::decode(&bytes);
-        let (lines, lang, starts, text_ok) = match &decoded {
-            Some((text, enc)) => {
-                let lines: Vec<String> = text.lines().map(|l| l.replace('\t', "    ")).collect();
-                let lang = syntax::detect(path);
-                let starts = lang.map(|l| syntax::line_states(l, lines.iter().map(String::as_str))).unwrap_or_default();
-                if let Some(l) = lang {
-                    title = format!("{title}  [{}]", l.name());
-                }
-                if *enc != Enc::Utf8 {
-                    title = format!("{title}  ({})", enc.name());
-                }
-                (lines, lang, starts, true)
-            }
-            None => {
-                title = format!("{title}  (binary, {} bytes)", bytes.len());
-                (Vec::new(), None, Vec::new(), false)
-            }
-        };
-        self.open = Some(Doc {
-            title,
-            bytes,
-            lines,
-            lang,
-            starts,
-            text_ok,
-            hex: !text_ok,
-            scroll: Vec2::ZERO,
-            page: 400.0,
-            find_open: false,
-            focus_find: false,
-            find_q: String::new(),
-            case: false,
-            hit: None,
-            msg: String::new(),
-            goto_open: false,
-            focus_goto: false,
-            goto_q: String::new(),
-        });
+        self.open = Some(load(path)?);
         self.fresh = true;
         Ok(())
     }
@@ -232,127 +187,156 @@ impl Viewer {
 
 /// Draws the viewer window; returns true when it should close.
 fn draw(doc: &mut Doc, fresh: bool, ctx: &egui::Context, class: egui::ViewportClass, dark: bool, title: &str) -> bool {
+    let mut close = ctx.input(|i| i.viewport().close_requested());
+    if crate::fullscreen::show(ctx, class, title, |ui| {
+        if doc.ui(ui, fresh, Keys::All, dark) {
+            close = true;
+        }
+    }) {
+        close = true;
+    }
+    close
+}
+
+/// Which keys a viewer reacts to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Keys {
+    /// None (it sits beside something that uses the keyboard).
+    None,
+    /// Scrolling only, while no text field has the focus.
+    Scroll,
+    /// All of them: scrolling, find, go to, hex, close.
+    All,
+}
+
+impl Doc {
+    /// Draws the toolbar and the text (or hex dump) into `ui`; returns true when a key asked to close it.
+    pub fn ui(&mut self, ui: &mut egui::Ui, fresh: bool, keys: Keys, dark: bool) -> bool {
+        let ctx = ui.ctx().clone();
+        let ctx = &ctx;
         let typing = ctx.wants_keyboard_input();
         let font = FontId::monospace(FONT_SIZE);
         let row_h = ctx.fonts(|f| f.row_height(&font));
         let char_w = ctx.fonts(|f| f.glyph_width(&font, 'M'));
-        let mut close = ctx.input(|i| i.viewport().close_requested());
+        let mut close = false;
 
         let k = |ctx: &egui::Context, key: Key| ctx.input(|i| i.key_pressed(key));
         let (ctrl, shift) = ctx.input(|i| (i.modifiers.command, i.modifiers.shift));
-        if !fresh {
+        if keys == Keys::All && !fresh {
             if k(ctx, Key::F7) || (ctrl && k(ctx, Key::F)) {
-                doc.find_open = true;
-                doc.focus_find = true;
+                self.find_open = true;
+                self.focus_find = true;
             } else if ctrl && k(ctx, Key::G) {
-                doc.goto_open = true;
-                doc.focus_goto = true;
+                self.goto_open = true;
+                self.focus_goto = true;
             } else if k(ctx, Key::Escape) {
-                if doc.find_open || doc.goto_open {
-                    doc.find_open = false;
-                    doc.goto_open = false;
+                if self.find_open || self.goto_open {
+                    self.find_open = false;
+                    self.goto_open = false;
                 } else {
                     close = true;
                 }
             } else if k(ctx, Key::F3) {
-                if doc.find_q.is_empty() {
+                if self.find_q.is_empty() {
                     close = true;
                 } else {
-                    doc.find(!shift, row_h, char_w);
+                    self.find(!shift, row_h, char_w);
                 }
             } else if !typing && k(ctx, Key::Q) {
                 close = true;
-            } else if !typing && !ctrl && doc.text_ok && k(ctx, Key::H) {
-                doc.hex = !doc.hex;
-                doc.hit = None;
-                doc.scroll = Vec2::ZERO;
+            } else if !typing && !ctrl && self.text_ok && k(ctx, Key::H) {
+                self.hex = !self.hex;
+                self.hit = None;
+                self.scroll = Vec2::ZERO;
             }
         }
         // Keyboard scrolling: arrows by a row / a few characters, PgUp/PgDn by a page, Home/End to the ends.
-        if !close && !typing {
-            let total = doc.rows() as f32 * row_h;
+        if keys != Keys::None && !close && !typing {
+            let total = self.rows() as f32 * row_h;
             let (dy, dx, home, end) = ctx.input(|i| {
                 let k = |key| i.key_pressed(key);
                 let mut dy = 0.0;
                 let mut dx = 0.0;
                 if k(Key::ArrowDown) { dy += row_h; }
                 if k(Key::ArrowUp) { dy -= row_h; }
-                if k(Key::PageDown) || k(Key::Space) { dy += doc.page - row_h; }
-                if k(Key::PageUp) { dy -= doc.page - row_h; }
+                if k(Key::PageDown) || k(Key::Space) { dy += self.page - row_h; }
+                if k(Key::PageUp) { dy -= self.page - row_h; }
                 if k(Key::ArrowRight) { dx += 40.0; }
                 if k(Key::ArrowLeft) { dx -= 40.0; }
                 (dy, dx, k(Key::Home), k(Key::End))
             });
-            doc.scroll.y = if home { 0.0 } else if end { total } else { doc.scroll.y + dy };
-            doc.scroll.x = if home { 0.0 } else { (doc.scroll.x + dx).max(0.0) };
-            doc.scroll.y = doc.scroll.y.clamp(0.0, (total - doc.page).max(0.0));
+            self.scroll.y = if home { 0.0 } else if end { total } else { self.scroll.y + dy };
+            self.scroll.x = if home { 0.0 } else { (self.scroll.x + dx).max(0.0) };
+            self.scroll.y = self.scroll.y.clamp(0.0, (total - self.page).max(0.0));
         }
 
-        let scroll = doc.scroll;
-        let mut page = doc.page;
+        let scroll = self.scroll;
+        let page: f32;
         let mut offset = scroll;
-        if crate::fullscreen::show(ctx, class, title, |ui| {
-            ui.horizontal(|ui| {
-                if ui.add_enabled(doc.text_ok, egui::Button::new(if doc.hex { "Text  (H)" } else { "Hex  (H)" })).clicked() {
-                    doc.hex = !doc.hex;
-                    doc.hit = None;
-                    doc.scroll = Vec2::ZERO;
+        {
+            ui.horizontal_wrapped(|ui| {
+                if ui.add_enabled(self.text_ok, egui::Button::new(if self.hex { "Text  (H)" } else { "Hex  (H)" })).clicked() {
+                    self.hex = !self.hex;
+                    self.hit = None;
+                    self.scroll = Vec2::ZERO;
                     offset = Vec2::ZERO;
                 }
                 if ui.button("Find  (F7)").clicked() {
-                    doc.find_open = !doc.find_open;
-                    doc.focus_find = doc.find_open;
+                    self.find_open = !self.find_open;
+                    self.focus_find = self.find_open;
                 }
-                if ui.button(if doc.hex { "Go to offset  (Ctrl+G)" } else { "Go to line  (Ctrl+G)" }).clicked() {
-                    doc.goto_open = !doc.goto_open;
-                    doc.focus_goto = doc.goto_open;
+                if ui.button(if self.hex { "Go to offset  (Ctrl+G)" } else { "Go to line  (Ctrl+G)" }).clicked() {
+                    self.goto_open = !self.goto_open;
+                    self.focus_goto = self.goto_open;
                 }
-                ui.weak(if doc.hex { format!("{} bytes", doc.bytes.len()) } else { format!("{} lines", doc.lines.len()) });
-                if !doc.msg.is_empty() {
-                    ui.label(&doc.msg);
+                ui.weak(if self.hex { format!("{} bytes", self.bytes.len()) } else { format!("{} lines", self.lines.len()) });
+                if !self.msg.is_empty() {
+                    ui.label(&self.msg);
                 }
             });
-            if doc.find_open {
+            if self.find_open {
                 ui.horizontal(|ui| {
                     ui.label("Find");
-                    let f = ui.add(egui::TextEdit::singleline(&mut doc.find_q).id(egui::Id::new("viewer_find")).desired_width(240.0));
-                    if std::mem::take(&mut doc.focus_find) {
+                    let f = ui.add(egui::TextEdit::singleline(&mut self.find_q).id(egui::Id::new("viewer_find")).desired_width(240.0));
+                    if std::mem::take(&mut self.focus_find) {
                         f.request_focus();
                     }
                     if f.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                        doc.find(!ui.input(|i| i.modifiers.shift), row_h, char_w);
+                        self.find(!ui.input(|i| i.modifiers.shift), row_h, char_w);
                         f.request_focus();
                     }
-                    ui.checkbox(&mut doc.case, "Match case");
+                    ui.checkbox(&mut self.case, "Match case");
                     if ui.button("Previous  (Shift+F3)").clicked() {
-                        doc.find(false, row_h, char_w);
+                        self.find(false, row_h, char_w);
                     }
                     if ui.button("Next  (F3)").clicked() {
-                        doc.find(true, row_h, char_w);
+                        self.find(true, row_h, char_w);
                     }
                 });
             }
-            if doc.goto_open {
+            if self.goto_open {
                 ui.horizontal(|ui| {
-                    ui.label(if doc.hex { "Offset (hex)" } else { "Line" });
-                    let g = ui.add(egui::TextEdit::singleline(&mut doc.goto_q).id(egui::Id::new("viewer_goto")).desired_width(120.0));
-                    if std::mem::take(&mut doc.focus_goto) {
+                    ui.label(if self.hex { "Offset (hex)" } else { "Line" });
+                    let g = ui.add(egui::TextEdit::singleline(&mut self.goto_q).id(egui::Id::new("viewer_goto")).desired_width(120.0));
+                    if std::mem::take(&mut self.focus_goto) {
                         g.request_focus();
                     }
                     let enter = g.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
                     if ui.button("Go").clicked() || enter {
-                        doc.go_to(row_h);
-                        doc.goto_open = false;
+                        self.go_to(row_h);
+                        self.goto_open = false;
                     }
                 });
             }
-            ui.weak("Up/Down, PgUp/PgDn, Space, Home/End, Left/Right scroll   F7 find   F3 / Shift+F3 next / previous   Ctrl+G go to   H hex / text   Esc or Q close");
+            if keys == Keys::All {
+                ui.weak("Up/Down, PgUp/PgDn, Space, Home/End, Left/Right scroll   F7 find   F3 / Shift+F3 next / previous   Ctrl+G go to   H hex / text   Esc or Q close");
+            }
             ui.separator();
             // find / go to may have moved the scroll position
-            offset = if doc.scroll != scroll { doc.scroll } else { offset };
+            offset = if self.scroll != scroll { self.scroll } else { offset };
             let plain = ui.visuals().text_color();
             let weak = ui.visuals().weak_text_color();
-            let d = &*doc;
+            let d = &*self;
             let out = egui::ScrollArea::both().auto_shrink(false).scroll_offset(offset).show_rows(ui, row_h, d.rows(), |ui, range| {
                 for n in range {
                     let job = if d.hex {
@@ -366,15 +350,65 @@ fn draw(doc: &mut Doc, fresh: bool, ctx: &egui::Context, class: egui::ViewportCl
             });
             offset = out.state.offset;
             page = out.inner_rect.height();
-        }) {
-            close = true;
         }
         if !close {
-            doc.scroll = offset;
-            doc.page = page;
+            self.scroll = offset;
+            self.page = page;
         }
         close
     }
+
+}
+
+/// Loads `path` for viewing. Text is decoded (UTF-8, UTF-16 with BOM, else Windows-1250);
+    /// a file with NUL bytes opens as a hex dump.
+pub fn load(path: &Path) -> std::io::Result<Doc> {
+        let mut bytes = Vec::new();
+        let file = std::fs::File::open(path)?;
+        let total = file.metadata()?.len();
+        file.take(MAX_BYTES).read_to_end(&mut bytes)?;
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let mut title = if total > MAX_BYTES { format!("{name} (first {} MB)", MAX_BYTES >> 20) } else { name };
+        let decoded = textenc::decode(&bytes);
+        let (lines, lang, starts, text_ok) = match &decoded {
+            Some((text, enc)) => {
+                let lines: Vec<String> = text.lines().map(|l| l.replace('\t', "    ")).collect();
+                let lang = syntax::detect(path);
+                let starts = lang.map(|l| syntax::line_states(l, lines.iter().map(String::as_str))).unwrap_or_default();
+                if let Some(l) = lang {
+                    title = format!("{title}  [{}]", l.name());
+                }
+                if *enc != Enc::Utf8 {
+                    title = format!("{title}  ({})", enc.name());
+                }
+                (lines, lang, starts, true)
+            }
+            None => {
+                title = format!("{title}  (binary, {} bytes)", bytes.len());
+                (Vec::new(), None, Vec::new(), false)
+            }
+        };
+    Ok(Doc {
+            title,
+            bytes,
+            lines,
+            lang,
+            starts,
+            text_ok,
+            hex: !text_ok,
+            scroll: Vec2::ZERO,
+            page: 400.0,
+            find_open: false,
+            focus_find: false,
+            find_q: String::new(),
+            case: false,
+            hit: None,
+            msg: String::new(),
+            goto_open: false,
+            focus_goto: false,
+            goto_q: String::new(),
+    })
+}
 
 fn hit_color(dark: bool) -> Color32 {
     if dark { Color32::from_rgb(110, 90, 20) } else { Color32::from_rgb(255, 230, 120) }

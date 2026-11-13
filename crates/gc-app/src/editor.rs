@@ -1,7 +1,7 @@
 //! F4 text editor: a window of its own (opens over the main window) around egui's multi-line `TextEdit` with syntax colours (see `syntax`),
 //! line numbers, Ctrl+S, find / replace and a keep-or-discard question when closing a changed file.
 //! Keeps the file's encoding (UTF-8, UTF-8 with BOM, UTF-16 with BOM, Windows-1250; changeable) and line
-//! endings, has its own undo / redo and go to line (Ctrl+G). Big or binary files are not opened here
+//! endings, has its own undo / redo, go to line (Ctrl+G) and a viewer beside it (Ctrl+F3). Big or binary files are not opened here
 //! (`open` returns `Ok(false)`: the caller falls back to Notepad).
 
 use std::borrow::Cow;
@@ -19,6 +19,7 @@ use eframe::egui::{
 use crate::fullscreen::Link;
 use crate::syntax::{self, Lang, State};
 use crate::textenc::{self, Enc};
+use crate::viewer::{Doc as ViewDoc, Keys};
 
 /// Bigger files go to Notepad: the whole text is coloured and hashed on every change.
 const MAX_BYTES: u64 = 2 * 1024 * 1024;
@@ -71,6 +72,9 @@ struct Doc {
     goto_open: bool,
     focus_goto: bool,
     goto_q: String,
+    /// A viewer beside the editor (Ctrl+F3) and the file dialog that is choosing its file.
+    pane: Option<ViewDoc>,
+    picking: Option<std::sync::mpsc::Receiver<Option<PathBuf>>>,
 }
 
 fn hash(s: &str) -> u64 {
@@ -238,6 +242,30 @@ impl Doc {
         }
     }
 
+    fn start_pick(&mut self, ctx: &egui::Context) {
+        if self.picking.is_none() {
+            let dir = self.path.parent().map(Path::to_path_buf).unwrap_or_default();
+            self.picking = Some(crate::filedialog::pick_file(ctx, "View a file beside the editor", &dir));
+        }
+    }
+
+    /// Takes the file chosen in the dialog (if it is done) and loads it into the viewer pane.
+    fn poll_pick(&mut self) {
+        use std::sync::mpsc::TryRecvError;
+        let Some(rx) = &self.picking else { return };
+        match rx.try_recv() {
+            Ok(Some(path)) => {
+                self.picking = None;
+                match crate::viewer::load(&path) {
+                    Ok(doc) => self.pane = Some(doc),
+                    Err(e) => self.msg = format!("{}: {e}", path.display()),
+                }
+            }
+            Ok(None) | Err(TryRecvError::Disconnected) => self.picking = None,
+            Err(TryRecvError::Empty) => {}
+        }
+    }
+
     fn go_to_line(&mut self, ctx: &egui::Context, id: Id, row_h: f32, page: f32) {
         let Ok(l) = self.goto_q.trim().parse::<usize>() else {
             self.msg = "Type a line number.".into();
@@ -336,6 +364,8 @@ impl Editor {
             goto_open: false,
             focus_goto: false,
             goto_q: String::new(),
+            pane: None,
+            picking: None,
         });
         Ok(true)
     }
@@ -360,6 +390,12 @@ impl Editor {
         } else if undo {
             d.undo(ctx, id, row_h, d.page);
         }
+        // Ctrl+F3: choose a file to view beside the editor.
+        let ctrl_f3 = ctx.input(|i| i.modifiers.command && i.key_pressed(Key::F3));
+        if ctrl_f3 {
+            d.start_pick(ctx);
+        }
+        d.poll_pick();
         let mut want_close = ctx.input(|i| i.viewport().close_requested());
         if want_close && d.modified() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
@@ -430,13 +466,41 @@ impl Editor {
         let mut scroll_y = 0.0;
         let title = format!("Edit: {}{}{}", d.name, d.lang.map(|l| format!("  [{}]", l.name())).unwrap_or_default(), if modified { "  *" } else { "" });
         let closed = crate::fullscreen::show(ctx, class, &title, |ui| {
-            ui.horizontal(|ui| {
+            if d.pane.is_some() {
+                let w = ctx.screen_rect().width();
+                let (mut other, mut close_pane) = (false, false);
+                egui::SidePanel::right("editor_view_pane").resizable(true).default_width(w / 2.0).width_range(220.0..=(w - 260.0).max(220.0)).show_inside(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        if ui.button("Close view").clicked() {
+                            close_pane = true;
+                        }
+                        if ui.button("Other file...").clicked() {
+                            other = true;
+                        }
+                        ui.strong(d.pane.as_ref().map(|p| p.title.as_str()).unwrap_or_default());
+                    });
+                    ui.separator();
+                    if let Some(p) = &mut d.pane {
+                        p.ui(ui, false, Keys::Scroll, dark);
+                    }
+                });
+                if other {
+                    d.start_pick(ctx);
+                }
+                if close_pane {
+                    d.pane = None;
+                }
+            }
+            ui.horizontal_wrapped(|ui| {
                 if ui.button("Save  (Ctrl+S)").clicked() {
                     d.save();
                 }
                 if ui.button("Find / Replace  (Ctrl+F)").clicked() {
                     d.find_open = !d.find_open;
                     d.focus_find = d.find_open;
+                }
+                if ui.button("View file beside  (Ctrl+F3)").clicked() {
+                    d.start_pick(ctx);
                 }
                 if ui.add_enabled(!d.undo.is_empty(), egui::Button::new("Undo")).on_hover_text("Ctrl+Z").clicked() {
                     d.undo(ctx, id, row_h, page_prev);
@@ -511,7 +575,7 @@ impl Editor {
                     ui.label("Replace");
                     ui.add(TextEdit::singleline(&mut d.repl).desired_width(180.0));
                     ui.checkbox(&mut d.case, "Match case");
-                    if ui.button("Next  (F3)").clicked() || enter || f3 {
+                    if ui.button("Next  (F3)").clicked() || enter || (f3 && !ctrl_f3) {
                         d.find_next(ctx, id, row_h, page);
                     }
                     if ui.button("Replace").clicked() {
