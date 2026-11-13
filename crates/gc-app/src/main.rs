@@ -8,6 +8,7 @@ mod drive_bar;
 mod ftp_window;
 mod help_window;
 mod options;
+mod prefs;
 mod editor;
 mod filedialog;
 mod fullscreen;

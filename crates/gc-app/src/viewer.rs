@@ -4,9 +4,10 @@
 
 use std::io::Read;
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime};
 
-use eframe::egui::{self, text::LayoutJob, Color32, FontId, Key, TextFormat, Vec2};
+use eframe::egui::{self, text::LayoutJob, Color32, FontId, Key, Pos2, Rect, TextFormat, Vec2};
 
 use crate::fullscreen::Link;
 use crate::syntax::{self, Kind, Lang, State};
@@ -49,11 +50,92 @@ pub struct Doc {
     goto_open: bool,
     focus_goto: bool,
     goto_q: String,
+    path: PathBuf,
+    /// Modified time and size of the file as loaded (to notice changes).
+    stamp: (Option<SystemTime>, u64),
+    last_check: Instant,
+    /// After a reload while the end was shown: scroll to the new end.
+    follow: bool,
+    /// Wrapped layout: characters per visual row and cumulative visual rows before each line.
+    cum_cols: usize,
+    cum: Vec<usize>,
+}
+
+fn stamp_of(path: &Path) -> (Option<SystemTime>, u64) {
+    std::fs::metadata(path).map(|m| (m.modified().ok(), m.len())).unwrap_or((None, 0))
 }
 
 impl Doc {
+    fn wrap_on(&self) -> bool {
+        !self.hex && crate::prefs::wrap()
+    }
+
+    /// Rows on screen: visual rows when wrapping, else lines (or hex rows).
     fn rows(&self) -> usize {
-        if self.hex { self.bytes.len().div_ceil(HEX_W) } else { self.lines.len() }
+        if self.hex {
+            self.bytes.len().div_ceil(HEX_W)
+        } else if self.wrap_on() {
+            self.cum.last().copied().unwrap_or(0)
+        } else {
+            self.lines.len()
+        }
+    }
+
+    /// First visual row of a line.
+    fn vrow_of(&self, line: usize) -> usize {
+        if self.wrap_on() { self.cum.get(line).copied().unwrap_or_else(|| self.cum.last().copied().unwrap_or(0)) } else { line }
+    }
+
+    /// The line that a visual row belongs to.
+    fn line_of(&self, vrow: usize) -> usize {
+        let n = self.lines.len();
+        if self.wrap_on() { self.cum.partition_point(|&c| c <= vrow).saturating_sub(1).min(n.saturating_sub(1)) } else { vrow.min(n.saturating_sub(1)) }
+    }
+
+    /// (Re)builds the wrapped layout for `cols` characters per row.
+    fn ensure_cum(&mut self, cols: usize) {
+        if self.cum_cols == cols && self.cum.len() == self.lines.len() + 1 {
+            return;
+        }
+        self.cum_cols = cols;
+        let mut total = 0;
+        self.cum = std::iter::once(0)
+            .chain(self.lines.iter().map(|l| {
+                total += l.chars().count().div_ceil(cols).max(1);
+                total
+            }))
+            .collect();
+    }
+
+    /// Reloads the file when it changed on disk (checked about once a second).
+    fn poll_reload(&mut self, ctx: &egui::Context, row_h: f32) {
+        if !crate::prefs::auto_reload() {
+            return;
+        }
+        ctx.request_repaint_after(Duration::from_millis(1000));
+        if self.last_check.elapsed() < Duration::from_millis(800) {
+            return;
+        }
+        self.last_check = Instant::now();
+        let stamp = stamp_of(&self.path);
+        if stamp == self.stamp {
+            return;
+        }
+        let Ok(new) = load(&self.path) else { return };
+        let end_shown = self.scroll.y + self.page >= self.rows() as f32 * row_h - row_h * 1.5;
+        self.title = new.title;
+        self.bytes = new.bytes;
+        self.lines = new.lines;
+        self.lang = new.lang;
+        self.starts = new.starts;
+        self.text_ok = new.text_ok;
+        if !new.text_ok {
+            self.hex = true;
+        }
+        self.stamp = new.stamp;
+        self.hit = None;
+        self.cum_cols = 0;
+        self.follow = end_shown;
     }
 
     fn scroll_to_row(&mut self, row: usize, row_h: f32) {
@@ -71,7 +153,7 @@ impl Doc {
         match found {
             Some((row, s, e)) => {
                 self.hit = Some((row, s, e));
-                self.scroll_to_row(row, row_h);
+                self.scroll_to_row(self.vrow_of(row), row_h);
                 if self.hex {
                     self.msg = format!("offset 0x{s:X}");
                     self.scroll.x = 0.0;
@@ -90,7 +172,7 @@ impl Doc {
             return None;
         }
         let q = if self.case { self.find_q.clone() } else { self.find_q.to_ascii_lowercase() };
-        let top = ((self.scroll.y / row_h) as usize).min(n - 1);
+        let top = self.line_of((self.scroll.y / row_h) as usize).min(n - 1);
         let (line, col) = match self.hit {
             Some((l, s, e)) => (l, if forward { e } else { s }),
             None => (top, 0),
@@ -140,7 +222,7 @@ impl Doc {
         } else {
             match q.parse::<usize>() {
                 Ok(l) if l >= 1 => {
-                    self.scroll_to_row(l.min(self.lines.len().max(1)) - 1, row_h);
+                    self.scroll_to_row(self.vrow_of(l.min(self.lines.len().max(1)) - 1), row_h);
                     self.scroll.y = (self.scroll.y + self.page / 3.0 - row_h * 2.0).max(0.0);
                     self.msg.clear();
                 }
@@ -219,6 +301,17 @@ impl Doc {
         let row_h = ctx.fonts(|f| f.row_height(&font));
         let char_w = ctx.fonts(|f| f.glyph_width(&font, 'M'));
         let mut close = false;
+        let cols = (((ui.available_width() - 18.0) / char_w) as usize).max(8);
+        self.poll_reload(ctx, row_h);
+        if self.wrap_on() {
+            self.ensure_cum(cols);
+            self.scroll.x = 0.0;
+            if std::mem::take(&mut self.follow) {
+                self.scroll.y = (self.rows() as f32 * row_h - self.page).max(0.0);
+            }
+        } else if std::mem::take(&mut self.follow) {
+            self.scroll.y = (self.rows() as f32 * row_h - self.page).max(0.0);
+        }
 
         let k = |ctx: &egui::Context, key: Key| ctx.input(|i| i.key_pressed(key));
         let (ctrl, shift) = ctx.input(|i| (i.modifiers.command, i.modifiers.shift));
@@ -290,6 +383,20 @@ impl Doc {
                     self.focus_goto = self.goto_open;
                 }
                 ui.weak(if self.hex { format!("{} bytes", self.bytes.len()) } else { format!("{} lines", self.lines.len()) });
+                let mut wrap = crate::prefs::wrap();
+                if !self.hex && ui.checkbox(&mut wrap, "Wrap").changed() {
+                    let line = self.line_of((self.scroll.y / row_h) as usize);
+                    crate::prefs::set_wrap(wrap);
+                    if wrap {
+                        self.ensure_cum(cols);
+                    }
+                    self.scroll = Vec2::new(0.0, self.vrow_of(line) as f32 * row_h);
+                    offset = self.scroll;
+                }
+                let mut reload = crate::prefs::auto_reload();
+                if ui.checkbox(&mut reload, "Auto-reload").on_hover_text("Reload the file when it changes on disk; stays at the end when the end is shown").changed() {
+                    crate::prefs::set_auto_reload(reload);
+                }
                 if !self.msg.is_empty() {
                     ui.label(&self.msg);
                 }
@@ -337,17 +444,39 @@ impl Doc {
             let plain = ui.visuals().text_color();
             let weak = ui.visuals().weak_text_color();
             let d = &*self;
-            let out = egui::ScrollArea::both().auto_shrink(false).scroll_offset(offset).show_rows(ui, row_h, d.rows(), |ui, range| {
-                for n in range {
-                    let job = if d.hex {
-                        hex_row(&d.bytes, n, d.hit, dark, plain, weak)
-                    } else {
-                        let hit = d.hit.filter(|h| h.0 == n).map(|h| h.1..h.2);
-                        colored(&d.lines[n], d.lang, d.starts.get(n).copied().unwrap_or_default(), dark, plain, hit)
-                    };
-                    ui.add(egui::Label::new(job).extend());
-                }
-            });
+            let out = if d.wrap_on() {
+                let width = cols as f32 * char_w + 3.0;
+                egui::ScrollArea::vertical().auto_shrink(false).scroll_offset(offset).show_viewport(ui, |ui, viewport| {
+                    ui.set_height(d.rows() as f32 * row_h);
+                    if d.lines.is_empty() {
+                        return;
+                    }
+                    let first = d.line_of((viewport.min.y / row_h) as usize);
+                    let last = d.line_of((viewport.max.y / row_h) as usize + 1);
+                    let origin = ui.min_rect().min;
+                    for l in first..=last {
+                        let rows_l = (d.cum[l + 1] - d.cum[l]) as f32;
+                        let rect = Rect::from_min_size(Pos2::new(origin.x, origin.y + d.cum[l] as f32 * row_h), Vec2::new(width, rows_l * row_h));
+                        let hit = d.hit.filter(|h| h.0 == l).map(|h| h.1..h.2);
+                        let job = colored(&d.lines[l], d.lang, d.starts.get(l).copied().unwrap_or_default(), dark, plain, hit, true);
+                        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::top_down(egui::Align::Min)), |ui| {
+                            ui.add(egui::Label::new(job).wrap());
+                        });
+                    }
+                })
+            } else {
+                egui::ScrollArea::both().auto_shrink(false).scroll_offset(offset).show_rows(ui, row_h, d.rows(), |ui, range| {
+                    for n in range {
+                        let job = if d.hex {
+                            hex_row(&d.bytes, n, d.hit, dark, plain, weak)
+                        } else {
+                            let hit = d.hit.filter(|h| h.0 == n).map(|h| h.1..h.2);
+                            colored(&d.lines[n], d.lang, d.starts.get(n).copied().unwrap_or_default(), dark, plain, hit, false)
+                        };
+                        ui.add(egui::Label::new(job).extend());
+                    }
+                })
+            };
             offset = out.state.offset;
             page = out.inner_rect.height();
         }
@@ -407,6 +536,12 @@ pub fn load(path: &Path) -> std::io::Result<Doc> {
             goto_open: false,
             focus_goto: false,
             goto_q: String::new(),
+            path: path.to_path_buf(),
+            stamp: stamp_of(path),
+            last_check: Instant::now(),
+            follow: false,
+            cum_cols: 0,
+            cum: Vec::new(),
     })
 }
 
@@ -415,7 +550,7 @@ fn hit_color(dark: bool) -> Color32 {
 }
 
 /// One text line as a layout job: a colour per syntax span, the search hit on a background.
-fn colored(line: &str, lang: Option<Lang>, st: State, dark: bool, plain: Color32, hit: Option<Range<usize>>) -> LayoutJob {
+fn colored(line: &str, lang: Option<Lang>, st: State, dark: bool, plain: Color32, hit: Option<Range<usize>>, wrap: bool) -> LayoutJob {
     let font = FontId::monospace(FONT_SIZE);
     let mut segments: Vec<(Range<usize>, Color32)> = Vec::new();
     let mut pos = 0;
@@ -432,6 +567,7 @@ fn colored(line: &str, lang: Option<Lang>, st: State, dark: bool, plain: Color32
         segments.push((pos..line.len(), plain));
     }
     let mut job = LayoutJob::default();
+    job.wrap.break_anywhere = wrap;
     for (range, color) in segments {
         // split at the hit borders
         let mut cuts = vec![range.start];

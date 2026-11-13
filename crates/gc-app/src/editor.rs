@@ -47,7 +47,9 @@ struct Doc {
     /// Coloured layout of the text with this hash.
     cache: (u64, Option<Arc<LayoutJob>>),
     /// Line numbers for this many lines.
-    gutter: (usize, String),
+    gutter: (u64, String),
+    /// Characters per row while wrapping (None: no wrapping); set every frame.
+    wrap_cols: Option<usize>,
     find_open: bool,
     focus_find: bool,
     find_q: String,
@@ -81,6 +83,11 @@ fn hash(s: &str) -> u64 {
     let mut h = DefaultHasher::new();
     s.hash(&mut h);
     h.finish()
+}
+
+/// Width of a line in character cells (a tab counts as four).
+fn cells(line: &str) -> usize {
+    line.chars().count() + 3 * line.matches('\t').count()
 }
 
 fn byte_of(text: &str, chars: usize) -> usize {
@@ -137,11 +144,17 @@ fn replace_all(text: &str, q: &str, r: &str, case: bool) -> (String, usize) {
 }
 
 /// The whole text as one layout job, coloured per syntax span (plain when the language is unknown).
-fn job_for(text: &str, lang: Option<Lang>, dark: bool, plain: Color32) -> LayoutJob {
+fn job_for(text: &str, lang: Option<Lang>, dark: bool, plain: Color32, wrap: Option<f32>) -> LayoutJob {
     let font = FontId::monospace(FONT_SIZE);
     let fmt = |color: Color32| TextFormat { font_id: font.clone(), color, ..Default::default() };
     let mut job = LayoutJob::default();
-    job.wrap.max_width = f32::INFINITY;
+    match wrap {
+        Some(w) => {
+            job.wrap.max_width = w;
+            job.wrap.break_anywhere = true;
+        }
+        None => job.wrap.max_width = f32::INFINITY,
+    }
     let Some(lang) = lang else {
         job.append(text, 0.0, fmt(plain));
         return job;
@@ -280,8 +293,15 @@ impl Doc {
     }
 
     fn scroll_to(&mut self, byte: usize, row_h: f32, page: f32) {
-        let line = self.text[..byte.min(self.text.len())].matches('\n').count();
-        self.pending_scroll = Some((line as f32 * row_h - page / 3.0).max(0.0));
+        let before = &self.text[..byte.min(self.text.len())];
+        let row = match self.wrap_cols {
+            None => before.matches('\n').count(),
+            Some(c) => {
+                let segs: Vec<&str> = before.split('\n').collect();
+                segs.iter().enumerate().map(|(k, l)| if k + 1 < segs.len() { cells(l).div_ceil(c).max(1) } else { cells(l) / c }).sum()
+            }
+        };
+        self.pending_scroll = Some((row as f32 * row_h - page / 3.0).max(0.0));
     }
 
     fn find_next(&mut self, ctx: &egui::Context, id: Id, row_h: f32, page: f32) {
@@ -343,6 +363,7 @@ impl Editor {
             saved,
             cache: (0, None),
             gutter: (0, String::new()),
+            wrap_cols: None,
             find_open: false,
             focus_find: false,
             find_q: String::new(),
@@ -523,6 +544,10 @@ impl Editor {
                     ui.selectable_value(&mut d.crlf, false, "LF");
                     ui.selectable_value(&mut d.crlf, true, "CRLF");
                 });
+                let mut wrap = crate::prefs::wrap();
+                if ui.checkbox(&mut wrap, "Wrap").changed() {
+                    crate::prefs::set_wrap(wrap);
+                }
                 if before != (d.enc, d.crlf) {
                     d.format_dirty = true;
                     d.msg = "Saved in the new format with the next Ctrl+S.".into();
@@ -588,29 +613,50 @@ impl Editor {
             }
             ui.separator();
 
-            let mut scroll = egui::ScrollArea::both().auto_shrink(false).id_salt(("editor_scroll", d.serial));
+            let wrap = crate::prefs::wrap();
+            let char_w = ctx.fonts(|f| f.glyph_width(&FontId::monospace(FONT_SIZE), 'M'));
+            let text_w = (ui.available_width() - 70.0).max(200.0);
+            d.wrap_cols = if wrap { Some(((text_w / char_w) as usize).max(8)) } else { None };
+            let mut scroll = egui::ScrollArea::both().auto_shrink(false).scroll([!wrap, true]).id_salt(("editor_scroll", d.serial));
             if let Some(y) = d.pending_scroll.take() {
                 scroll = scroll.vertical_scroll_offset(y);
             }
             let rows = ((ui.available_height() / row_h) as usize).max(3);
-            let view_w = ui.available_width();
             let plain = ui.visuals().text_color();
             let weak = ui.visuals().weak_text_color();
-            let Doc { text, cache, lang, gutter, fresh, .. } = d;
+            let Doc { text, cache, lang, gutter, fresh, wrap_cols, .. } = d;
+            let wrap_cols = *wrap_cols;
             let out = scroll.show(ui, |ui| {
                 ui.horizontal_top(|ui| {
                     ui.spacing_mut().item_spacing.x = 8.0;
                     let n = text.matches('\n').count() + 1;
-                    if gutter.0 != n {
+                    let gkey = match wrap_cols {
+                        Some(c) => (hash(text) ^ ((c as u64) << 40)) | 1,
+                        None => (n as u64) << 1,
+                    };
+                    if gutter.0 != gkey {
                         let w = n.to_string().len();
-                        *gutter = (n, (1..=n).map(|i| format!("{i:>w$}")).collect::<Vec<_>>().join("\n"));
+                        let mut out = String::new();
+                        for (i, l) in text.split('\n').enumerate() {
+                            if i > 0 {
+                                out.push('\n');
+                            }
+                            out.push_str(&format!("{:>w$}", i + 1));
+                            if let Some(c) = wrap_cols {
+                                for _ in 1..cells(l).div_ceil(c).max(1) {
+                                    out.push('\n');
+                                }
+                            }
+                        }
+                        *gutter = (gkey, out);
                     }
                     ui.add(egui::Label::new(RichText::new(gutter.1.as_str()).monospace().size(FONT_SIZE).color(weak)).selectable(false));
                     let lang = *lang;
-                    let mut layouter = |ui: &egui::Ui, s: &str, _wrap: f32| {
-                        let key = hash(s);
+                    let mut layouter = |ui: &egui::Ui, s: &str, wrap_width: f32| {
+                        let ww = wrap_cols.map(|_| wrap_width);
+                        let key = hash(s) ^ ww.map_or(0, |w| (w as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15));
                         if cache.0 != key || cache.1.is_none() {
-                            *cache = (key, Some(Arc::new(job_for(s, lang, dark, plain))));
+                            *cache = (key, Some(Arc::new(job_for(s, lang, dark, plain, ww))));
                         }
                         let job = cache.1.as_ref().map(|j| (**j).clone()).unwrap_or_default();
                         ui.fonts(|f| f.layout_job(job))
@@ -622,7 +668,7 @@ impl Editor {
                             .margin(egui::Margin::ZERO)
                             .lock_focus(true)
                             .desired_rows(rows)
-                            .desired_width((view_w - 70.0).max(200.0))
+                            .desired_width(text_w)
                             .layouter(&mut layouter),
                     );
                     if std::mem::take(fresh) {

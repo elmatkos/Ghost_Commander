@@ -274,11 +274,15 @@ pub struct Settings {
     pub win_pos: Option<[i32; 2]>,
     pub win_size: Option<[u32; 2]>,
     pub win_maximized: bool,
+    /// Viewer / editor: wrap long lines.
+    pub wrap_lines: bool,
+    /// Viewer: reload a file that changed on disk and follow its end.
+    pub auto_reload: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { theme: None, drive_buttons: true, drive_free_bar: true, left_dir: None, right_dir: None, left_tabs: Vec::new(), right_tabs: Vec::new(), left_tab: 0, right_tab: 0, switch_on_missing_drive: false, win_pos: None, win_size: None, win_maximized: false }
+        Self { theme: None, drive_buttons: true, drive_free_bar: true, left_dir: None, right_dir: None, left_tabs: Vec::new(), right_tabs: Vec::new(), left_tab: 0, right_tab: 0, switch_on_missing_drive: false, win_pos: None, win_size: None, win_maximized: false, wrap_lines: false, auto_reload: true }
     }
 }
 

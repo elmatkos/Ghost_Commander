@@ -22,6 +22,9 @@ pub enum Lang {
     Ini,
     Markdown,
     Batch,
+    /// UEFI Shell script (`.nsh`).
+    Nsh,
+    Log,
 }
 
 impl Lang {
@@ -38,6 +41,8 @@ impl Lang {
             Lang::Ini => "INI",
             Lang::Markdown => "Markdown",
             Lang::Batch => "Batch",
+            Lang::Nsh => "UEFI Shell",
+            Lang::Log => "Log",
         }
     }
 }
@@ -57,6 +62,8 @@ pub fn detect(path: &Path) -> Option<Lang> {
         "ini" | "cfg" | "conf" | "inf" | "toml" | "properties" | "reg" => Lang::Ini,
         "md" | "markdown" => Lang::Markdown,
         "bat" | "cmd" => Lang::Batch,
+        "nsh" => Lang::Nsh,
+        "log" => Lang::Log,
         _ => return None,
     })
 }
@@ -72,6 +79,8 @@ pub enum Kind {
     Variable,
     Function,
     Param,
+    Error,
+    Warn,
 }
 
 /// What a line starts inside of.
@@ -106,6 +115,8 @@ pub fn color(kind: Kind, dark: bool) -> Color32 {
         Kind::Variable => ((156, 220, 254), (0, 16, 128)),
         Kind::Function => ((220, 220, 170), (121, 94, 38)),
         Kind::Param => ((200, 160, 230), (110, 70, 140)),
+        Kind::Error => ((244, 90, 90), (200, 30, 30)),
+        Kind::Warn => ((230, 170, 50), (175, 105, 0)),
     };
     let (r, g, b) = if dark { d } else { l };
     Color32::from_rgb(r, g, b)
@@ -235,6 +246,8 @@ pub fn scan(lang: Lang, line: &str, mut st: State) -> (Vec<Span>, State) {
         Lang::Ini => return (data::scan_ini(line), State::Normal),
         Lang::Markdown => return data::scan_markdown(line, st),
         Lang::Batch => return (data::scan_batch(line), State::Normal),
+        Lang::Nsh => return (data::scan_nsh(line), State::Normal),
+        Lang::Log => return (data::scan_log(line), State::Normal),
         _ => {}
     }
     let b = line.as_bytes();
@@ -614,5 +627,7 @@ mod tests {
         assert_eq!(detect(Path::new("a.csproj")), Some(Lang::Xml));
         assert_eq!(detect(Path::new("README.md")), Some(Lang::Markdown));
         assert_eq!(detect(Path::new("run.cmd")), Some(Lang::Batch));
+        assert_eq!(detect(Path::new("startup.NSH")), Some(Lang::Nsh));
+        assert_eq!(detect(Path::new("gc.log")), Some(Lang::Log));
     }
 }
