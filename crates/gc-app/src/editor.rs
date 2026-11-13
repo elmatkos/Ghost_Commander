@@ -1,4 +1,4 @@
-//! F4 text editor: a full-window page around egui's multi-line `TextEdit` with syntax colours (see `syntax`),
+//! F4 text editor: a window of its own (opens over the main window) around egui's multi-line `TextEdit` with syntax colours (see `syntax`),
 //! line numbers, Ctrl+S, find / replace and a keep-or-discard question when closing a changed file.
 //! Keeps the file's encoding (UTF-8, UTF-8 with BOM, UTF-16 with BOM, Windows-1250; changeable) and line
 //! endings, has its own undo / redo and go to line (Ctrl+G). Big or binary files are not opened here
@@ -16,6 +16,7 @@ use eframe::egui::{
     Color32, FontId, Id, Key, Modifiers, RichText, TextEdit, TextFormat,
 };
 
+use crate::fullscreen::Link;
 use crate::syntax::{self, Lang, State};
 use crate::textenc::{self, Enc};
 
@@ -29,6 +30,7 @@ const TAB: &str = "    ";
 #[derive(Default)]
 pub struct Editor {
     doc: Option<Doc>,
+    link: Link,
 }
 
 struct Doc {
@@ -300,6 +302,7 @@ impl Editor {
         let Some((text, enc)) = textenc::decode(&std::fs::read(path)?) else { return Ok(false) };
         let crlf = text.contains("\r\n");
         let text = if crlf { text.replace("\r\n", "\n") } else { text };
+        self.link = Link::default();
         let saved = hash(&text);
         let text_copy = text.clone();
         self.doc = Some(Doc {
@@ -339,6 +342,12 @@ impl Editor {
 
     pub fn show(&mut self, ctx: &egui::Context, dark: bool) {
         let Some(d) = &mut self.doc else { return };
+        let wtitle = format!("Edit: {}{}{}", d.name, d.lang.map(|l| format!("  [{}]", l.name())).unwrap_or_default(), if d.modified() { "  *" } else { "" });
+        let builder = self.link.builder(ctx, &wtitle);
+        let vid = egui::ViewportId::from_hash_of("gc_editor");
+        let (mut done, mut minimized) = (false, false);
+        ctx.show_viewport_immediate(vid, builder, |ctx, class| {
+        minimized = ctx.input(|i| i.viewport().minimized).unwrap_or(false);
         let id = Id::new(("editor_text", d.serial));
         let row_h = ctx.fonts(|f| f.row_height(&FontId::monospace(FONT_SIZE)));
         let modified = d.modified();
@@ -351,7 +360,10 @@ impl Editor {
         } else if undo {
             d.undo(ctx, id, row_h, d.page);
         }
-        let mut want_close = false;
+        let mut want_close = ctx.input(|i| i.viewport().close_requested());
+        if want_close && d.modified() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        }
         if ctrl_s {
             d.save();
         }
@@ -417,7 +429,7 @@ impl Editor {
         let mut page = 400.0;
         let mut scroll_y = 0.0;
         let title = format!("Edit: {}{}{}", d.name, d.lang.map(|l| format!("  [{}]", l.name())).unwrap_or_default(), if modified { "  *" } else { "" });
-        let closed = crate::fullscreen::show(ctx, "editor", &title, |ui| {
+        let closed = crate::fullscreen::show(ctx, class, &title, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("Save  (Ctrl+S)").clicked() {
                     d.save();
@@ -567,8 +579,14 @@ impl Editor {
             if d.modified() {
                 d.confirm = true;
             } else {
-                self.doc = None;
+                done = true;
             }
+        }
+        });
+        self.link.sync(ctx, vid, minimized);
+        if done {
+            self.doc = None;
+            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
         }
     }
 }

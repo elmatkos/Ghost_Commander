@@ -1,4 +1,4 @@
-//! F3 viewer, a full-window page: read-only text with syntax colours (only the rows on screen are
+//! F3 viewer, a window of its own that opens over the main window: read-only text with syntax colours (only the rows on screen are
 //! coloured), a hex dump for binary files (H toggles), find (F7 / Ctrl+F, F3 next, Shift+F3 previous)
 //! and go to line / offset (Ctrl+G).
 
@@ -8,6 +8,7 @@ use std::path::Path;
 
 use eframe::egui::{self, text::LayoutJob, Color32, FontId, Key, TextFormat, Vec2};
 
+use crate::fullscreen::Link;
 use crate::syntax::{self, Kind, Lang, State};
 use crate::textenc::{self, Enc};
 
@@ -22,6 +23,7 @@ pub struct Viewer {
     open: Option<Doc>,
     /// Opened during the current frame.
     fresh: bool,
+    link: Link,
 }
 
 struct Doc {
@@ -209,11 +211,32 @@ impl Viewer {
         let Some(doc) = &mut self.open else { return };
         // The F3 that opened the viewer is still "pressed" in this very frame: ignore it once.
         let fresh = std::mem::take(&mut self.fresh);
+        if fresh {
+            self.link = Link::default();
+        }
+        let title = format!("View: {}", doc.title);
+        let builder = self.link.builder(ctx, &title);
+        let id = egui::ViewportId::from_hash_of("gc_viewer");
+        let (mut close, mut minimized) = (false, false);
+        ctx.show_viewport_immediate(id, builder, |ctx, class| {
+            minimized = ctx.input(|i| i.viewport().minimized).unwrap_or(false);
+            close = draw(doc, fresh, ctx, class, dark, &title);
+        });
+        self.link.sync(ctx, id, minimized);
+        if close {
+            self.open = None;
+            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
+        }
+    }
+}
+
+/// Draws the viewer window; returns true when it should close.
+fn draw(doc: &mut Doc, fresh: bool, ctx: &egui::Context, class: egui::ViewportClass, dark: bool, title: &str) -> bool {
         let typing = ctx.wants_keyboard_input();
         let font = FontId::monospace(FONT_SIZE);
         let row_h = ctx.fonts(|f| f.row_height(&font));
         let char_w = ctx.fonts(|f| f.glyph_width(&font, 'M'));
-        let mut close = false;
+        let mut close = ctx.input(|i| i.viewport().close_requested());
 
         let k = |ctx: &egui::Context, key: Key| ctx.input(|i| i.key_pressed(key));
         let (ctrl, shift) = ctx.input(|i| (i.modifiers.command, i.modifiers.shift));
@@ -268,8 +291,7 @@ impl Viewer {
         let scroll = doc.scroll;
         let mut page = doc.page;
         let mut offset = scroll;
-        let title = format!("View: {}", doc.title);
-        if crate::fullscreen::show(ctx, "viewer", &title, |ui| {
+        if crate::fullscreen::show(ctx, class, title, |ui| {
             ui.horizontal(|ui| {
                 if ui.add_enabled(doc.text_ok, egui::Button::new(if doc.hex { "Text  (H)" } else { "Hex  (H)" })).clicked() {
                     doc.hex = !doc.hex;
@@ -324,6 +346,7 @@ impl Viewer {
                     }
                 });
             }
+            ui.weak("Up/Down, PgUp/PgDn, Space, Home/End, Left/Right scroll   F7 find   F3 / Shift+F3 next / previous   Ctrl+G go to   H hex / text   Esc or Q close");
             ui.separator();
             // find / go to may have moved the scroll position
             offset = if doc.scroll != scroll { doc.scroll } else { offset };
@@ -346,15 +369,12 @@ impl Viewer {
         }) {
             close = true;
         }
-        let doc = self.open.as_mut().filter(|_| !close);
-        if let Some(doc) = doc {
+        if !close {
             doc.scroll = offset;
             doc.page = page;
-        } else {
-            self.open = None;
         }
+        close
     }
-}
 
 fn hit_color(dark: bool) -> Color32 {
     if dark { Color32::from_rgb(110, 90, 20) } else { Color32::from_rgb(255, 230, 120) }
