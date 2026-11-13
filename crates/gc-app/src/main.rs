@@ -11,6 +11,7 @@ mod help_window;
 mod options;
 mod prefs;
 mod editor;
+mod evtx_viewer;
 mod filedialog;
 mod fullscreen;
 mod image_viewer;
@@ -45,6 +46,7 @@ use verify_window::VerifyWindow;
 use sysinfo_window::SysInfoWindow;
 use theme_editor::ThemeManager;
 use editor::Editor;
+use evtx_viewer::EvtxViewer;
 use image_viewer::ImageViewer;
 use viewer::Viewer;
 
@@ -114,6 +116,7 @@ struct App {
     drives: Arc<std::sync::Mutex<Vec<gc_core::DriveInfo>>>,
     viewer: Viewer,
     editor: Editor,
+    evtx: EvtxViewer,
     images: ImageViewer,
     /// Archive files being extracted for F3 / F4 / Enter, with what to do when ready.
     extractions: Vec<(std::sync::mpsc::Receiver<std::io::Result<PathBuf>>, FileUse)>,
@@ -194,6 +197,7 @@ impl App {
             drives: watch_drives(&cc.egui_ctx),
             viewer: Viewer::default(),
             editor: Editor::default(),
+            evtx: EvtxViewer::default(),
             images: ImageViewer::default(),
             extractions: Vec::new(),
         }
@@ -234,6 +238,10 @@ impl App {
             },
             FileUse::View if image_viewer::is_image(&file) => {
                 self.images.open(ctx, &file, siblings);
+                Ok(())
+            }
+            FileUse::View if file.extension().is_some_and(|e| e.eq_ignore_ascii_case("evtx")) => {
+                self.evtx.open(ctx, &file);
                 Ok(())
             }
             FileUse::View => self.viewer.open(&file),
@@ -1388,6 +1396,7 @@ impl App {
             || self.dism.open
             || self.viewer.is_open()
             || self.editor.is_open()
+            || self.evtx.is_open()
             || self.jobs.iter().any(|j| j.job.progress.pending_conflict().is_some());
         if !dialog_open {
             self.handle_keys(ctx);
@@ -1569,6 +1578,7 @@ impl App {
         self.save_window_if_changed(ctx);
         self.viewer.show(ctx, self.themes.active.dark);
         self.editor.show(ctx, self.themes.active.dark);
+        self.evtx.show(ctx, self.themes.active.dark);
         if let Some(err) = self.images.show(ctx) {
             self.status = Some(err);
         }

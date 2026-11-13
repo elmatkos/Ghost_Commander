@@ -1407,7 +1407,7 @@ dependencies = [
 
 [[package]]
 name = "gc-app"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "chrono",
  "eframe",
@@ -1429,7 +1429,7 @@ dependencies = [
 
 [[package]]
 name = "gc-archive"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "chrono",
  "flate2",
@@ -1444,7 +1444,7 @@ dependencies = [
 
 [[package]]
 name = "gc-core"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "crc32fast",
  "md-5",
@@ -1456,7 +1456,7 @@ dependencies = [
 
 [[package]]
 name = "gc-dism"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "serde",
  "toml 0.8.23",
@@ -1465,7 +1465,7 @@ dependencies = [
 
 [[package]]
 name = "gc-ftp"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "chrono",
  "gc-core",
@@ -1479,7 +1479,7 @@ dependencies = [
 
 [[package]]
 name = "gc-sysinfo"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "gc-core",
  "windows 0.58.0",
