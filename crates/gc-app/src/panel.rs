@@ -903,6 +903,10 @@ impl Panel {
                 let left = rect.left_center() + egui::vec2(6.0, 0.0);
                 painter.text(left, Align2::LEFT_CENTER, glyph, FontId::proportional(15.0), glyph_color);
                 let name = if e.is_dir { format!("[{}]", e.name) } else { e.name.clone() };
+                // a long name must not run into the size and date columns: shorten it in the middle
+                let name_w = (rect.right() - 6.0 - DATE_COL_W - 90.0) - (left.x + ICON_COL_W);
+                let char_w = ui.fonts(|f| f.glyph_width(&font, 'M'));
+                let name = shorten_middle(&name, (name_w / char_w) as usize);
                 painter.text(left + egui::vec2(ICON_COL_W, 0.0), Align2::LEFT_CENTER, name, font.clone(), color);
                 let right = rect.right_center() - egui::vec2(6.0, 0.0);
                 if let Some(t) = e.modified {
@@ -972,6 +976,19 @@ const HEADER_H: f32 = 20.0;
 /// Height reserved for the quick filter box.
 const FILTER_H: f32 = 28.0;
 /// Space before the name for the file-type icon.
+/// `name` cut to `max` characters with an ellipsis in the middle (the end, with the extension, stays).
+fn shorten_middle(name: &str, max: usize) -> String {
+    let n = name.chars().count();
+    if n <= max || max < 8 {
+        return name.to_string();
+    }
+    let keep = max - 1;
+    let tail = (keep / 2).min(10);
+    let head: String = name.chars().take(keep - tail).collect();
+    let end: String = name.chars().skip(n - tail).collect();
+    format!("{head}\u{2026}{end}")
+}
+
 const ICON_COL_W: f32 = 22.0;
 /// Width reserved for the "YYYY-MM-DD HH:MM" column plus a gap.
 const DATE_COL_W: f32 = 140.0;
@@ -993,6 +1010,16 @@ pub fn fmt_size(bytes: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn long_names_are_shortened_in_the_middle() {
+        assert_eq!(super::shorten_middle("short.txt", 20), "short.txt");
+        let s = super::shorten_middle("a_very_long_file_name_with_many_parts_and_an_extension.tar.gz", 24);
+        assert_eq!(s.chars().count(), 24);
+        assert!(s.starts_with("a_very_long") && s.ends_with("ension.tar.gz") || s.ends_with("n.tar.gz"), "{s}");
+        assert!(s.contains('\u{2026}'));
+        assert_eq!(super::shorten_middle("abcdefghij", 5), "abcdefghij", "too narrow to shorten");
+    }
+
     use super::{fmt_size, Panel, PARENT};
 
     fn new_panel(root: &std::path::Path) -> Panel {

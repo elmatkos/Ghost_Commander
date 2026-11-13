@@ -425,11 +425,14 @@ fn draw(doc: &mut Doc, ui: &mut egui::Ui, fresh: bool, dark: bool) -> bool {
         }
     }
 
-    // detail panel
-    egui::TopBottomPanel::bottom("evtx_detail").resizable(true).default_height(230.0).show_inside(ui, |ui| {
-        detail(doc, ui, dark, plain, weak);
-    });
-
+    let total_h = ui.available_height();
+    let detail_h = (total_h * 0.40).clamp(140.0, 460.0).min((total_h - 120.0).max(60.0));
+    let list_h = (total_h - detail_h - 10.0).max(60.0);
+    let list_w = ui.available_width();
+    let mut clicked = None;
+    ui.allocate_ui(Vec2::new(list_w, list_h), |ui| {
+        ui.set_min_size(Vec2::new(list_w, list_h));
+        ui.set_max_height(list_h);
     // header: clickable column titles
     let total_w = ui.available_width();
     {
@@ -462,8 +465,7 @@ fn draw(doc: &mut Doc, ui: &mut egui::Ui, fresh: bool, dark: bool) -> bool {
     let n = doc.view.len();
     let scroll_to = ctx.input(|i| i.key_pressed(Key::ArrowUp) || i.key_pressed(Key::ArrowDown) || i.key_pressed(Key::PageUp) || i.key_pressed(Key::PageDown) || i.key_pressed(Key::Home) || i.key_pressed(Key::End));
     let sel_row = doc.selected.and_then(|s| doc.view.iter().position(|&i| i == s));
-    let mut clicked = None;
-    egui::ScrollArea::vertical().auto_shrink(false).show_rows(ui, row_h, n, |ui, range| {
+    egui::ScrollArea::vertical().auto_shrink(false).max_height((list_h - row_h - 6.0).max(40.0)).show_rows(ui, row_h, n, |ui, range| {
         for row in range {
             let e = &doc.events[doc.view[row]];
             let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), row_h), Sense::click());
@@ -494,14 +496,19 @@ fn draw(doc: &mut Doc, ui: &mut egui::Ui, fresh: bool, dark: bool) -> bool {
             p.text(egui::pos2(x, cy), Align2::LEFT_CENTER, &e.summary, font, weak);
         }
     });
+    });
     if let Some(i) = clicked {
         doc.selected = Some(i);
     }
+    ui.separator();
+    ui.allocate_ui(Vec2::new(list_w, detail_h), |ui| {
+        ui.set_min_size(Vec2::new(list_w, detail_h - 6.0));
+        detail(doc, ui, dark, plain, weak);
+    });
     close
 }
 
 fn detail(doc: &mut Doc, ui: &mut egui::Ui, dark: bool, plain: Color32, weak: Color32) {
-    ui.set_min_height(210.0);
     let Some(sel) = doc.selected else {
         ui.weak("Select an event (click, or Up / Down).");
         return;
