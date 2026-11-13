@@ -540,6 +540,59 @@ pub fn scan_log(line: &str) -> Vec<Span> {
     out
 }
 
+const VBS_KW: &[&str] = &[
+    "dim", "redim", "preserve", "erase", "set", "let", "if", "then", "else", "elseif", "end", "for", "each", "in", "to", "step", "next", "while", "wend", "do", "loop", "until", "sub", "function", "call", "class", "const", "option", "explicit", "on", "error", "resume", "goto", "select", "case", "exit", "byval", "byref", "private", "public", "default", "property", "get", "not", "and", "or", "xor", "eqv", "imp", "mod", "is", "new", "with", "true", "false", "nothing", "null", "empty", "stop", "randomize",
+];
+const VBS_FUNCS: &[&str] = &[
+    "msgbox", "inputbox", "createobject", "getobject", "wscript", "len", "left", "right", "mid", "instr", "instrrev", "replace", "split", "join", "ubound", "lbound", "cstr", "cint", "clng", "cdbl", "cbool", "cdate", "now", "date", "time", "trim", "ltrim", "rtrim", "ucase", "lcase", "chr", "asc", "isnull", "isempty", "isnumeric", "isarray", "isobject", "array", "eval", "execute", "abs", "int", "fix", "round", "rnd", "sgn", "sqr", "string", "space", "typename", "vartype", "formatnumber", "formatdatetime", "dateadd", "datediff", "datepart", "year", "month", "day", "hour", "minute", "second", "timer", "sleep", "echo", "quit",
+];
+
+/// VBScript: `'` and `Rem` comments, strings with `""`, keywords and built-in functions (case-insensitive).
+pub fn scan_vbs(line: &str) -> Vec<Span> {
+    let b = line.as_bytes();
+    let n = b.len();
+    let mut out = Vec::new();
+    let mut i = 0;
+    let first = b.iter().position(|c| !c.is_ascii_whitespace());
+    while i < n {
+        let c = b[i];
+        if c == b'\'' {
+            push(&mut out, i..n, Kind::Comment);
+            return out;
+        } else if c == b'"' {
+            let (e, _) = quoted(b, i, b'"', None, true);
+            push(&mut out, i..e, Kind::String);
+            i = e;
+        } else if c.is_ascii_digit() {
+            let mut j = i + 1;
+            while j < n && (b[j].is_ascii_alphanumeric() || b[j] == b'.') {
+                j += 1;
+            }
+            push(&mut out, i..j, Kind::Number);
+            i = j;
+        } else if is_ident(c) {
+            let mut j = i;
+            while j < n && is_ident(b[j]) {
+                j += 1;
+            }
+            let w = line[i..j].to_ascii_lowercase();
+            if w == "rem" && Some(i) == first && (j == n || b[j].is_ascii_whitespace()) {
+                push(&mut out, i..n, Kind::Comment);
+                return out;
+            }
+            if VBS_KW.contains(&w.as_str()) {
+                push(&mut out, i..j, Kind::Keyword);
+            } else if VBS_FUNCS.contains(&w.as_str()) {
+                push(&mut out, i..j, Kind::Function);
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::{scan, Lang};
@@ -596,8 +649,17 @@ mod tests {
     }
 
     #[test]
+    fn vbs() {
+        let k = kinds(Lang::Vbs, "Set fso = CreateObject(\"Scripting.FileSystemObject\") ' note");
+        assert!(k.contains(&("Set".into(), Kind::Keyword)) && k.contains(&("CreateObject".into(), Kind::Function)));
+        assert!(k.contains(&("\"Scripting.FileSystemObject\"".into(), Kind::String)) && k.contains(&("' note".into(), Kind::Comment)));
+        assert_eq!(kinds(Lang::Vbs, "REM hello"), vec![("REM hello".into(), Kind::Comment)]);
+        assert!(kinds(Lang::Vbs, "x = \"a \"\"q\"\" b\" : If x Then").contains(&("\"a \"\"q\"\" b\"".into(), Kind::String)));
+    }
+
+    #[test]
     fn odd_lines_do_not_panic() {
-        for lang in [Lang::Json, Lang::Xml, Lang::Ini, Lang::Markdown, Lang::Batch, Lang::Nsh, Lang::Log] {
+        for lang in [Lang::Json, Lang::Xml, Lang::Ini, Lang::Markdown, Lang::Batch, Lang::Nsh, Lang::Log, Lang::Vbs] {
             for l in ["", "@", "%", "!", "<", "<a", "\"", "[", "žluťoučký = ž", "rem", "re", "```", "#", "1."] {
                 for st in [State::Normal, State::Block, State::Tag, State::Fence] {
                     let (spans, _) = scan(lang, l, st);

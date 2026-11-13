@@ -510,7 +510,11 @@ pub fn load(path: &Path) -> std::io::Result<Doc> {
         let (lines, lang, starts, text_ok) = match &decoded {
             Some((text, enc)) => {
                 let lines: Vec<String> = text.lines().map(|l| l.replace('\t', "    ")).collect();
-                let lang = if doc_text.is_some() { Some(Lang::Markdown) } else { syntax::detect(path) };
+                let lang = match &doc_text {
+                    Some((_, "msg")) => None,
+                    Some(_) => Some(Lang::Markdown),
+                    None => syntax::detect(path),
+                };
                 let starts = lang.map(|l| syntax::line_states(l, lines.iter().map(String::as_str))).unwrap_or_default();
                 if let Some(l) = lang {
                     title = format!("{title}  [{}]", l.name());

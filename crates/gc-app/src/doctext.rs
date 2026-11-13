@@ -11,6 +11,7 @@ pub fn extract(path: &Path) -> Option<(String, &'static str)> {
     match ext.as_str() {
         "docx" => Some((docx_to_text(&zip_entry(path, "word/document.xml")?), "docx")),
         "odt" => Some((odt_to_text(&zip_entry(path, "content.xml")?), "odt")),
+        "msg" => Some((msg_to_text(path)?, "msg")),
         "rtf" => {
             let bytes = std::fs::read(path).ok()?;
             bytes.starts_with(b"{\\rtf").then(|| (rtf_to_text(&bytes), "rtf"))
@@ -47,6 +48,7 @@ fn unescape(s: &str) -> String {
             "lt" => out.push('<'),
             "gt" => out.push('>'),
             "quot" => out.push('"'),
+            "nbsp" => out.push(' '),
             "apos" => out.push('\''),
             _ => {
                 let code = ent.strip_prefix("#x").and_then(|h| u32::from_str_radix(h, 16).ok()).or_else(|| ent.strip_prefix('#').and_then(|d| d.parse().ok()));
@@ -173,6 +175,139 @@ pub fn odt_to_text(xml: &str) -> String {
         }
     });
     out
+}
+
+
+// ---- Outlook .msg (a compound file with property streams) ---------------------------
+
+type Msg = cfb::CompoundFile<std::fs::File>;
+
+fn stream(comp: &mut Msg, path: &str) -> Option<Vec<u8>> {
+    let mut s = comp.open_stream(path).ok()?;
+    let mut v = Vec::new();
+    s.read_to_end(&mut v).ok()?;
+    Some(v)
+}
+
+/// String property `id` (4 hex digits) of the message (`storage` = "" ) or of an attachment storage.
+fn prop_str(comp: &mut Msg, storage: &str, id: &str) -> Option<String> {
+    if let Some(b) = stream(comp, &format!("{storage}/__substg1.0_{id}001F")) {
+        let units: Vec<u16> = b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        return Some(String::from_utf16_lossy(&units).trim_end_matches('\0').to_string());
+    }
+    let b = stream(comp, &format!("{storage}/__substg1.0_{id}001E"))?;
+    Some(b.iter().take_while(|&&x| x != 0).map(|&x| crate::textenc::cp1250_char(x)).collect())
+}
+
+/// Delivery / submit time from the property stream of the message (FILETIME properties 0x0039, 0x0E06).
+fn msg_date(comp: &mut Msg) -> Option<String> {
+    let b = stream(comp, "/__properties_version1.0")?;
+    let mut found = None;
+    for e in b.get(32..)?.chunks_exact(16) {
+        let tag = u32::from_le_bytes(e[0..4].try_into().ok()?);
+        let (ty, id) = (tag & 0xFFFF, tag >> 16);
+        if ty == 0x0040 && (id == 0x0039 || id == 0x0E06) {
+            let ft = u64::from_le_bytes(e[8..16].try_into().ok()?);
+            let secs = (ft / 10_000_000) as i64 - 11_644_473_600;
+            found = chrono::DateTime::from_timestamp(secs, 0).map(|d| d.format("%Y-%m-%d %H:%M UTC").to_string());
+            if id == 0x0039 {
+                break;
+            }
+        }
+    }
+    found
+}
+
+/// Very rough HTML to text for mail bodies without a plain text part.
+pub fn html_to_text(html: &str) -> String {
+    let mut out = String::with_capacity(html.len() / 2);
+    let mut rest = html;
+    while let Some(lt) = rest.find('<') {
+        out.push_str(&unescape(&rest[..lt]));
+        let Some(gt) = rest[lt..].find('>') else { break };
+        let tag = rest[lt + 1..lt + gt].trim_start_matches('/').to_ascii_lowercase();
+        let name: String = tag.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+        if matches!(name.as_str(), "br" | "p" | "div" | "tr" | "li" | "h1" | "h2" | "h3" | "h4" | "table") {
+            out.push('\n');
+        }
+        if matches!(name.as_str(), "script" | "style") && !rest[lt + 1..].starts_with('/') {
+            let end = format!("</{name}");
+            rest = match rest[lt..].to_ascii_lowercase().find(&end) {
+                Some(p) => &rest[lt + p..],
+                None => "",
+            };
+            continue;
+        }
+        rest = &rest[lt + gt + 1..];
+    }
+    out.push_str(&unescape(rest));
+    let mut cleaned = String::new();
+    let mut blank = 0;
+    for line in out.lines().map(str::trim_end) {
+        if line.trim().is_empty() {
+            blank += 1;
+            if blank > 1 {
+                continue;
+            }
+        } else {
+            blank = 0;
+        }
+        cleaned.push_str(line);
+        cleaned.push('\n');
+    }
+    cleaned
+}
+
+/// Subject, addresses, date, attachment names and the body of an Outlook `.msg` file.
+pub fn msg_to_text(path: &Path) -> Option<String> {
+    let mut comp = cfb::open(path).ok()?;
+    let subject = prop_str(&mut comp, "", "0037");
+    let from_name = prop_str(&mut comp, "", "0C1A").unwrap_or_default();
+    let from_mail = prop_str(&mut comp, "", "5D01").or_else(|| prop_str(&mut comp, "", "0C1F")).unwrap_or_default();
+    let to = prop_str(&mut comp, "", "0E04");
+    let cc = prop_str(&mut comp, "", "0E03");
+    let headers = prop_str(&mut comp, "", "007D");
+    let date = headers
+        .as_deref()
+        .and_then(|h| h.lines().find(|l| l.len() > 5 && l[..5].eq_ignore_ascii_case("date:")))
+        .map(|l| l[5..].trim().to_string())
+        .or_else(|| msg_date(&mut comp));
+    let body = prop_str(&mut comp, "", "1000").filter(|b| !b.trim().is_empty()).or_else(|| {
+        let html = stream(&mut comp, "/__substg1.0_10130102")?;
+        let text = String::from_utf8(html.clone()).unwrap_or_else(|_| html.iter().map(|&x| crate::textenc::cp1250_char(x)).collect());
+        Some(html_to_text(&text))
+    });
+    let attach: Vec<String> = comp.walk().filter(|e| e.is_storage() && e.name().starts_with("__attach_version1.0_")).map(|e| e.path().to_string_lossy().replace('\\', "/")).collect();
+    let mut files = Vec::new();
+    for a in attach {
+        let name = prop_str(&mut comp, &a, "3707").or_else(|| prop_str(&mut comp, &a, "3704")).unwrap_or_else(|| "(unnamed)".into());
+        let size = stream(&mut comp, &format!("{a}/__substg1.0_37010102")).map(|d| d.len());
+        files.push(match size {
+            Some(n) => format!("{name} ({n} bytes)"),
+            None => name,
+        });
+    }
+    if subject.is_none() && body.is_none() {
+        return None;
+    }
+    let mut out = String::new();
+    out.push_str(&format!("Subject: {}\n", subject.unwrap_or_default()));
+    out.push_str(&format!("From: {from_name} <{from_mail}>\n"));
+    if let Some(t) = to.filter(|t| !t.is_empty()) {
+        out.push_str(&format!("To: {t}\n"));
+    }
+    if let Some(c) = cc.filter(|c| !c.is_empty()) {
+        out.push_str(&format!("Cc: {c}\n"));
+    }
+    if let Some(d) = date {
+        out.push_str(&format!("Date: {d}\n"));
+    }
+    if !files.is_empty() {
+        out.push_str(&format!("Attachments: {}\n", files.join("; ")));
+    }
+    out.push_str("\n----------------------------------------\n\n");
+    out.push_str(&body.unwrap_or_default().replace("\r\n", "\n"));
+    Some(out)
 }
 
 const RTF_SKIP: [&[u8]; 12] = [b"\\*", b"\\fonttbl", b"\\colortbl", b"\\stylesheet", b"\\info", b"\\pict", b"\\header", b"\\footer", b"\\themedata", b"\\datastore", b"\\listtable", b"\\listoverridetable"];
@@ -323,6 +458,37 @@ mod tests {
     fn rtf() {
         let t = rtf_to_text(br"{\rtf1\ansi{\fonttbl{\f0 Arial;}}{\*\generator x;}Hello \b bold\b0  world\par Second \u269? l\'edne\par}");
         assert_eq!(t, "Hello bold world\nSecond \u{10D} l\u{ED}ne\n");
+    }
+
+    #[test]
+    fn msg_file() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("gc_msg_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.msg");
+        let utf16 = |s: &str| s.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<u8>>();
+        {
+            let mut c = cfb::create(&path).unwrap();
+            c.create_stream("/__substg1.0_0037001F").unwrap().write_all(&utf16("Hello subject")).unwrap();
+            c.create_stream("/__substg1.0_0C1A001F").unwrap().write_all(&utf16("Alice")).unwrap();
+            c.create_stream("/__substg1.0_0C1F001F").unwrap().write_all(&utf16("alice@example.com")).unwrap();
+            c.create_stream("/__substg1.0_1000001F").unwrap().write_all(&utf16("Body line\r\nSecond")).unwrap();
+            c.create_storage("/__attach_version1.0_#00000000").unwrap();
+            c.create_stream("/__attach_version1.0_#00000000/__substg1.0_3707001F").unwrap().write_all(&utf16("report.pdf")).unwrap();
+            c.create_stream("/__attach_version1.0_#00000000/__substg1.0_37010102").unwrap().write_all(b"12345").unwrap();
+            c.flush().unwrap();
+        }
+        let t = msg_to_text(&path).unwrap();
+        assert!(t.contains("Subject: Hello subject\n") && t.contains("From: Alice <alice@example.com>") && t.contains("Attachments: report.pdf (5 bytes)") && t.contains("Body line\nSecond"), "{t}");
+        assert_eq!(extract(&path).map(|e| e.1), Some("msg"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn html_body() {
+        let t = html_to_text("<html><style>p{}</style><body><p>Hello &amp; welcome</p><div>line two<br>three</div></body></html>");
+        assert!(t.contains("Hello & welcome\n") && t.contains("line two\nthree"), "{t:?}");
+        assert!(!t.contains("p{}"));
     }
 
     #[test]

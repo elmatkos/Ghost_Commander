@@ -76,3 +76,28 @@ pub fn show(ctx: &Context, class: ViewportClass, title: &str, body: impl FnOnce(
     }
     close
 }
+
+/// Drawn over the main window while a viewer / editor window is open: Ghost Commander waits for it.
+/// The button brings that window back to the front.
+pub fn blocker(ctx: &Context, what: &str, viewport: ViewportId) {
+    let rect = ctx.screen_rect();
+    egui::Area::new(Id::new("gc_blocker")).order(Order::Foreground).fixed_pos(rect.min).constrain(false).show(ctx, |ui| {
+        ui.set_clip_rect(rect);
+        ui.interact(rect, Id::new("gc_blocker_block"), Sense::click_and_drag());
+        Frame::new().fill(egui::Color32::from_black_alpha(200)).show(ui, |ui| ui.set_min_size(rect.size()));
+    });
+    egui::Window::new("gc_blocker_message").title_bar(false).order(Order::Tooltip).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).collapsible(false).resizable(false).show(ctx, |ui| {
+        ui.vertical_centered(|ui| {
+            ui.add_space(6.0);
+            ui.heading(format!("{what} is open in its own window"));
+            ui.add_space(6.0);
+            ui.label("Close it (Esc) to go on working here.");
+            ui.add_space(10.0);
+            if ui.button("Show that window").clicked() {
+                ctx.send_viewport_cmd_to(viewport, ViewportCommand::Minimized(false));
+                ctx.send_viewport_cmd_to(viewport, ViewportCommand::Focus);
+            }
+            ui.add_space(6.0);
+        });
+    });
+}

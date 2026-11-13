@@ -159,6 +159,10 @@ struct Doc {
     src_q: String,
     text_q: String,
     selected: Option<usize>,
+    /// Position (in `view`) of the row the keys moved to: the list scrolls to show it.
+    reveal: Option<usize>,
+    scroll_y: f32,
+    view_h: f32,
     /// Formatted message of the selected event (record, text).
     message: Option<(u64, Option<String>)>,
     msg: String,
@@ -328,6 +332,9 @@ impl EvtxViewer {
             src_q: String::new(),
             text_q: String::new(),
             selected: None,
+            reveal: None,
+            scroll_y: 0.0,
+            view_h: 300.0,
             message: None,
             msg: String::new(),
             truncated: false,
@@ -422,6 +429,7 @@ fn draw(doc: &mut Doc, ui: &mut egui::Ui, fresh: bool, dark: bool) -> bool {
         let target = if up { Some(cur.saturating_sub(1)) } else if down { Some((cur + 1).min(last)) } else if pgup { Some(cur.saturating_sub(15)) } else if pgdn { Some((cur + 15).min(last)) } else if home { Some(0) } else if end { Some(last) } else { None };
         if let Some(t) = target {
             doc.selected = Some(doc.view[t]);
+            doc.reveal = Some(t);
         }
     }
 
@@ -463,18 +471,24 @@ fn draw(doc: &mut Doc, ui: &mut egui::Ui, fresh: bool, dark: bool) -> bool {
     // rows
     let desc_x: f32 = COLS.iter().map(|c| c.1).sum();
     let n = doc.view.len();
-    let scroll_to = ctx.input(|i| i.key_pressed(Key::ArrowUp) || i.key_pressed(Key::ArrowDown) || i.key_pressed(Key::PageUp) || i.key_pressed(Key::PageDown) || i.key_pressed(Key::Home) || i.key_pressed(Key::End));
-    let sel_row = doc.selected.and_then(|s| doc.view.iter().position(|&i| i == s));
-    egui::ScrollArea::vertical().auto_shrink(false).max_height((list_h - row_h - 6.0).max(40.0)).show_rows(ui, row_h, n, |ui, range| {
+    // show_rows spaces the rows by row_h + item spacing
+    let step = row_h + ui.spacing().item_spacing.y;
+    let mut area = egui::ScrollArea::vertical().auto_shrink(false).max_height((list_h - row_h - 6.0).max(40.0));
+    if let Some(t) = doc.reveal.take() {
+        let top = t as f32 * step;
+        if top < doc.scroll_y {
+            area = area.vertical_scroll_offset(top);
+        } else if top + step > doc.scroll_y + doc.view_h {
+            area = area.vertical_scroll_offset(top + step - doc.view_h);
+        }
+    }
+    let out = area.show_rows(ui, row_h, n, |ui, range| {
         for row in range {
             let e = &doc.events[doc.view[row]];
             let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), row_h), Sense::click());
             let selected = doc.selected == Some(doc.view[row]);
             if selected {
                 ui.painter().rect_filled(rect, 0.0, ui.visuals().selection.bg_fill);
-                if scroll_to && sel_row == Some(row) {
-                    ui.scroll_to_rect(rect, None);
-                }
             } else if resp.hovered() {
                 ui.painter().rect_filled(rect, 0.0, ui.visuals().widgets.hovered.bg_fill.linear_multiply(0.4));
             }
@@ -496,6 +510,8 @@ fn draw(doc: &mut Doc, ui: &mut egui::Ui, fresh: bool, dark: bool) -> bool {
             p.text(egui::pos2(x, cy), Align2::LEFT_CENTER, &e.summary, font, weak);
         }
     });
+    doc.scroll_y = out.state.offset.y;
+    doc.view_h = out.inner_rect.height();
     });
     if let Some(i) = clicked {
         doc.selected = Some(i);
@@ -607,6 +623,9 @@ mod tests {
             src_q: String::new(),
             text_q: String::new(),
             selected: None,
+            reveal: None,
+            scroll_y: 0.0,
+            view_h: 300.0,
             message: None,
             msg: String::new(),
             truncated: false,

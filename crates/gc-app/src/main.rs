@@ -1589,6 +1589,11 @@ impl App {
         self.editor.show(ctx, self.themes.active.dark);
         self.evtx.show(ctx, self.themes.active.dark);
         self.pdf.show(ctx);
+        // Ghost Commander waits while one of those windows is open: say so instead of looking dead.
+        let waiting = [(self.viewer.is_open(), "The viewer", "gc_viewer"), (self.editor.is_open(), "The editor", "gc_editor"), (self.evtx.is_open(), "The event log viewer", "gc_evtx"), (self.pdf.is_open(), "The PDF viewer", "gc_pdf")];
+        if let Some((_, what, id)) = waiting.into_iter().find(|w| w.0) {
+            fullscreen::blocker(ctx, what, egui::ViewportId::from_hash_of(id));
+        }
         if let Some(err) = self.images.show(ctx) {
             self.status = Some(err);
         }

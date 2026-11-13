@@ -9,13 +9,14 @@ pub struct Options {
     pub drive_buttons: bool,
     pub drive_free_bar: bool,
     pub switch_on_missing_drive: bool,
+    pub pdf_turn_pages: bool,
     error: Option<String>,
 }
 
 impl Options {
     pub fn load() -> Self {
         let s = load_settings();
-        Self { open: false, drive_buttons: s.drive_buttons, drive_free_bar: s.drive_free_bar, switch_on_missing_drive: s.switch_on_missing_drive, error: None }
+        Self { open: false, drive_buttons: s.drive_buttons, drive_free_bar: s.drive_free_bar, switch_on_missing_drive: s.switch_on_missing_drive, pdf_turn_pages: s.pdf_turn_pages, error: None }
     }
 
     pub fn show(&mut self, ctx: &egui::Context) {
@@ -48,6 +49,15 @@ impl Options {
                     "Switch: the panel jumps to the closest parent folder that still exists, or to another drive (C: first) when the whole drive is gone.\n\nThe removed path is not remembered, so it is not reopened when the drive returns.",
                 );
             });
+            ui.add_space(10.0);
+            ui.heading("PDF viewer");
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                changed |= ui.checkbox(&mut self.pdf_turn_pages, "Arrow keys continue on the next / previous page").changed();
+                info_icon(ui).on_hover_text(
+                    "On: Down at the end of a page shows the start of the next page, Up at the top shows the end of the previous page, like scrolling through one long document.\n\nOff: the arrow keys stop at the page edges; use PgUp / PgDn or Left / Right to change the page.",
+                );
+            });
             if let Some(e) = &self.error {
                 ui.colored_label(ui.visuals().error_fg_color, e);
             }
@@ -57,6 +67,8 @@ impl Options {
             s.drive_buttons = self.drive_buttons;
             s.drive_free_bar = self.drive_free_bar;
             s.switch_on_missing_drive = self.switch_on_missing_drive;
+            s.pdf_turn_pages = self.pdf_turn_pages;
+            crate::prefs::set_pdf_turn_pages_cached(self.pdf_turn_pages);
             self.error = save_settings(&s).err().map(|e| format!("Cannot save settings: {e}"));
         }
         self.open = open && !ctx.input(|i| i.key_pressed(Key::Escape));

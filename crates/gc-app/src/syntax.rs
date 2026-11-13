@@ -25,6 +25,8 @@ pub enum Lang {
     /// UEFI Shell script (`.nsh`).
     Nsh,
     Log,
+    /// VBScript (`.vbs`).
+    Vbs,
 }
 
 impl Lang {
@@ -43,6 +45,7 @@ impl Lang {
             Lang::Batch => "Batch",
             Lang::Nsh => "UEFI Shell",
             Lang::Log => "Log",
+            Lang::Vbs => "VBScript",
         }
     }
 }
@@ -58,11 +61,12 @@ pub fn detect(path: &Path) -> Option<Lang> {
         "rs" => Lang::Rust,
         "py" | "pyw" => Lang::Python,
         "json" | "jsonc" => Lang::Json,
-        "xml" | "xaml" | "html" | "htm" | "xhtml" | "svg" | "xsd" | "xsl" | "xslt" | "csproj" | "vcxproj" | "props" | "targets" | "config" | "resx" | "manifest" => Lang::Xml,
+        "xml" | "xaml" | "html" | "htm" | "xhtml" | "svg" | "xsd" | "xsl" | "xslt" | "csproj" | "vcxproj" | "props" | "targets" | "config" | "resx" | "manifest" | "hta" | "wsf" => Lang::Xml,
         "ini" | "cfg" | "conf" | "inf" | "toml" | "properties" | "reg" => Lang::Ini,
         "md" | "markdown" => Lang::Markdown,
         "bat" | "cmd" => Lang::Batch,
         "nsh" => Lang::Nsh,
+        "vbs" => Lang::Vbs,
         "log" => Lang::Log,
         _ => return None,
     })
@@ -248,6 +252,7 @@ pub fn scan(lang: Lang, line: &str, mut st: State) -> (Vec<Span>, State) {
         Lang::Batch => return (data::scan_batch(line), State::Normal),
         Lang::Nsh => return (data::scan_nsh(line), State::Normal),
         Lang::Log => return (data::scan_log(line), State::Normal),
+        Lang::Vbs => return (data::scan_vbs(line), State::Normal),
         _ => {}
     }
     let b = line.as_bytes();
@@ -629,5 +634,7 @@ mod tests {
         assert_eq!(detect(Path::new("run.cmd")), Some(Lang::Batch));
         assert_eq!(detect(Path::new("startup.NSH")), Some(Lang::Nsh));
         assert_eq!(detect(Path::new("gc.log")), Some(Lang::Log));
+        assert_eq!(detect(Path::new("x.VBS")), Some(Lang::Vbs));
+        assert_eq!(detect(Path::new("app.hta")), Some(Lang::Xml));
     }
 }

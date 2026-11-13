@@ -224,11 +224,21 @@ fn draw(doc: &mut Doc, ui: &mut egui::Ui, fresh: bool) -> bool {
             (k(Key::ArrowUp), k(Key::ArrowDown), k(Key::PageUp), k(Key::PageDown), k(Key::ArrowLeft), k(Key::ArrowRight), k(Key::Home), k(Key::End), k(Key::Plus) || k(Key::Equals), k(Key::Minus), k(Key::Num0))
         });
         let max_y = (doc.content_h - doc.view_h).max(0.0);
+        let chain = crate::prefs::pdf_turn_pages();
         if up {
-            doc.scroll.y = (doc.scroll.y - 60.0).max(0.0);
+            if chain && doc.scroll.y <= 1.0 && doc.cur > 0 {
+                doc.set_page(doc.cur - 1);
+                doc.scroll.y = f32::MAX;
+            } else {
+                doc.scroll.y = (doc.scroll.y - 60.0).max(0.0);
+            }
         }
         if down {
-            doc.scroll.y = (doc.scroll.y + 60.0).min(max_y);
+            if chain && doc.scroll.y >= max_y - 1.0 && doc.cur + 1 < pages {
+                doc.set_page(doc.cur + 1);
+            } else {
+                doc.scroll.y = (doc.scroll.y + 60.0).min(max_y);
+            }
         }
         if pgdn {
             if doc.scroll.y >= max_y - 1.0 && doc.cur + 1 < pages {

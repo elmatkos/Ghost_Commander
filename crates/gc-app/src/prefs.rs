@@ -9,13 +9,14 @@ use crate::theme;
 struct Prefs {
     wrap: AtomicBool,
     reload: AtomicBool,
+    pdf_turn: AtomicBool,
 }
 
 fn prefs() -> &'static Prefs {
     static P: OnceLock<Prefs> = OnceLock::new();
     P.get_or_init(|| {
         let s = theme::load_settings();
-        Prefs { wrap: AtomicBool::new(s.wrap_lines), reload: AtomicBool::new(s.auto_reload) }
+        Prefs { wrap: AtomicBool::new(s.wrap_lines), reload: AtomicBool::new(s.auto_reload), pdf_turn: AtomicBool::new(s.pdf_turn_pages) }
     })
 }
 
@@ -27,6 +28,16 @@ pub fn wrap() -> bool {
 /// The viewer reloads a file that changed on disk (and follows its end).
 pub fn auto_reload() -> bool {
     prefs().reload.load(Ordering::Relaxed)
+}
+
+/// The PDF viewer's arrow keys continue on the next / previous page.
+pub fn pdf_turn_pages() -> bool {
+    prefs().pdf_turn.load(Ordering::Relaxed)
+}
+
+/// Updates the in-memory value only (the Options window saves the settings file itself).
+pub fn set_pdf_turn_pages_cached(on: bool) {
+    prefs().pdf_turn.store(on, Ordering::Relaxed);
 }
 
 pub fn set_wrap(on: bool) {
