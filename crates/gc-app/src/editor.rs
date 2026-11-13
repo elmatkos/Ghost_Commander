@@ -352,9 +352,8 @@ impl Editor {
         };
         let mut page = 400.0;
         let mut scroll_y = 0.0;
-        let mut open = true;
         let title = format!("Edit: {}{}{}", d.name, d.lang.map(|l| format!("  [{}]", l.name())).unwrap_or_default(), if modified { "  *" } else { "" });
-        egui::Window::new(title).id(Id::new("editor")).open(&mut open).default_size([920.0, 620.0]).show(ctx, |ui| {
+        let closed = crate::fullscreen::show(ctx, "editor", &title, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("Save  (Ctrl+S)").clicked() {
                     d.save();
@@ -362,9 +361,6 @@ impl Editor {
                 if ui.button("Find / Replace  (Ctrl+F)").clicked() {
                     d.find_open = !d.find_open;
                     d.focus_find = d.find_open;
-                }
-                if ui.button("Close").clicked() {
-                    want_close = true;
                 }
                 ui.weak(format!("Ln {line}, Col {col}   {}   {}", d.enc.name(), if d.crlf { "CRLF" } else { "LF" }));
                 if !d.msg.is_empty() {
@@ -460,7 +456,7 @@ impl Editor {
         });
         d.page = page;
         d.scroll_y = scroll_y;
-        if !open {
+        if closed {
             want_close = true;
         }
         if want_close {

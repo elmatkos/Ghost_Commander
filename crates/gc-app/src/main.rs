@@ -9,6 +9,7 @@ mod ftp_window;
 mod help_window;
 mod options;
 mod editor;
+mod fullscreen;
 mod image_viewer;
 mod log;
 mod panel;

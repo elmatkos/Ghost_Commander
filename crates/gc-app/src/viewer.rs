@@ -81,11 +81,7 @@ impl Viewer {
         }
         let (scroll, mut page) = (doc.scroll, doc.page);
         let mut offset = scroll;
-        egui::Window::new(format!("View: {}", doc.title))
-            .id(egui::Id::new("viewer"))
-            .open(&mut open)
-            .default_size([900.0, 560.0])
-            .show(ctx, |ui| {
+        if crate::fullscreen::show(ctx, "viewer", &format!("View: {}", doc.title), |ui| {
                 let plain = ui.visuals().text_color();
                 let out = egui::ScrollArea::both().auto_shrink(false).scroll_offset(scroll).show_rows(ui, row_h, doc.lines.len(), |ui, range| {
                     for n in range {
@@ -102,7 +98,10 @@ impl Viewer {
                 });
                 offset = out.state.offset;
                 page = out.inner_rect.height();
-            });
+            })
+        {
+            open = false;
+        }
         doc.scroll = offset;
         doc.page = page;
         if !open {
