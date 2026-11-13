@@ -280,11 +280,15 @@ pub struct Settings {
     pub auto_reload: bool,
     /// PDF viewer: the arrow keys go on to the next / previous page at the end / start of a page.
     pub pdf_turn_pages: bool,
+    /// Panels: show the extension in a column of its own.
+    pub ext_column: bool,
+    /// Bookmarked folders (Ctrl+B).
+    pub bookmarks: Vec<String>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { theme: None, drive_buttons: true, drive_free_bar: true, left_dir: None, right_dir: None, left_tabs: Vec::new(), right_tabs: Vec::new(), left_tab: 0, right_tab: 0, switch_on_missing_drive: false, win_pos: None, win_size: None, win_maximized: false, wrap_lines: false, auto_reload: true, pdf_turn_pages: true }
+        Self { theme: None, drive_buttons: true, drive_free_bar: true, left_dir: None, right_dir: None, left_tabs: Vec::new(), right_tabs: Vec::new(), left_tab: 0, right_tab: 0, switch_on_missing_drive: false, win_pos: None, win_size: None, win_maximized: false, wrap_lines: false, auto_reload: true, pdf_turn_pages: true, ext_column: false, bookmarks: Vec::new() }
     }
 }
 

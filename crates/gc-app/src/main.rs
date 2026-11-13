@@ -2,7 +2,10 @@
 #![windows_subsystem = "windows"]
 
 mod about;
+mod bookmarks_window;
 mod checksums_window;
+mod diff_viewer;
+mod dircmp_window;
 mod dism_window;
 mod doctext;
 mod drive_bar;
@@ -43,7 +46,10 @@ use help_window::HelpWindow;
 use gc_archive::{ArchiveIndex, PackFormat};
 use panel::{FileUse, Panel, PanelAction, SortKey};
 use options::Options;
+use bookmarks_window::Bookmarks;
 use checksums_window::ChecksumsWindow;
+use diff_viewer::DiffViewer;
+use dircmp_window::DirCompare;
 use search_window::SearchWindow;
 use verify_window::VerifyWindow;
 use sysinfo_window::SysInfoWindow;
@@ -123,6 +129,9 @@ struct App {
     editor: Editor,
     evtx: EvtxViewer,
     pdf: PdfViewer,
+    diff: DiffViewer,
+    dircmp: DirCompare,
+    bookmarks: Bookmarks,
     images: ImageViewer,
     /// Archive files being extracted for F3 / F4 / Enter, with what to do when ready.
     extractions: Vec<(std::sync::mpsc::Receiver<std::io::Result<PathBuf>>, FileUse)>,
@@ -206,6 +215,9 @@ impl App {
             editor: Editor::default(),
             evtx: EvtxViewer::default(),
             pdf: PdfViewer::default(),
+            diff: DiffViewer::default(),
+            dircmp: DirCompare::default(),
+            bookmarks: Bookmarks::load(),
             images: ImageViewer::default(),
             extractions: Vec::new(),
         }
@@ -665,6 +677,43 @@ impl App {
         }
     }
 
+    /// Ctrl+K: compare the folders of the two panels.
+    fn open_dir_compare(&mut self) {
+        match (self.panels[0].disk_folder().map(Path::to_path_buf), self.panels[1].disk_folder().map(Path::to_path_buf)) {
+            (Some(l), Some(r)) => self.dircmp.open_for(&l, &r),
+            _ => self.status = Some("Folder compare needs a folder on disk in both panels.".into()),
+        }
+    }
+
+    /// Ctrl+Shift+K: two marked files of the active panel, or the files under the cursor in both panels.
+    fn open_file_compare(&mut self) {
+        let marked: Vec<PathBuf> = if self.panels[self.active].disk_folder().is_some() { self.panels[self.active].targets() } else { Vec::new() };
+        let pair = match marked.as_slice() {
+            [a, b] if a.is_file() && b.is_file() => Some((a.clone(), b.clone())),
+            _ => {
+                let one = |i: usize| self.panels[i].disk_folder().and_then(|_| self.panels[i].current_file()).filter(|p| p.is_file());
+                one(0).zip(one(1))
+            }
+        };
+        match pair {
+            Some((l, r)) => self.diff.open(&l, &r),
+            None => self.status = Some("Compare files: put the cursor on a file in each panel (or mark two files in one panel).".into()),
+        }
+    }
+
+    /// What the folder compare window asked for.
+    fn handle_dircmp_action(&mut self) {
+        match self.dircmp.take_action() {
+            Some(dircmp_window::Action::Diff(l, r)) => self.diff.open(&l, &r),
+            Some(dircmp_window::Action::Mark(l, r)) => {
+                self.panels[0].mark_names(&l);
+                self.panels[1].mark_names(&r);
+                self.dircmp.open = false;
+            }
+            None => {}
+        }
+    }
+
     /// Alt+F7: search, starting in the folder the active panel shows.
     fn open_search(&mut self) {
         let panel = &self.panels[self.active];
@@ -780,6 +829,16 @@ impl App {
             if pressed(ctx, Key::H) {
                 self.open_checksums(ctx);
             }
+            if pressed(ctx, Key::B) {
+                self.bookmarks.open = true;
+            }
+            if pressed(ctx, Key::K) {
+                if ctx.input(|i| i.modifiers.shift) {
+                    self.open_file_compare();
+                } else {
+                    self.open_dir_compare();
+                }
+            }
             if pressed(ctx, Key::N) {
                 self.ftp_win.open();
             }
@@ -820,7 +879,9 @@ impl App {
         if pressed(ctx, Key::End) {
             panel.cursor_to_end();
         }
-        if pressed(ctx, Key::Enter) {
+        if pressed(ctx, Key::Enter) && ctx.input(|i| i.modifiers.alt && i.modifiers.shift) {
+            panel.calc_sizes();
+        } else if pressed(ctx, Key::Enter) {
             panel.enter();
         }
         if pressed(ctx, Key::Backspace) {
@@ -1440,6 +1501,9 @@ impl App {
             || self.editor.is_open()
             || self.evtx.is_open()
             || self.pdf.is_open()
+            || self.diff.is_open()
+            || self.dircmp.open
+            || self.bookmarks.open
             || self.jobs.iter().any(|j| j.job.progress.pending_conflict().is_some());
         if !dialog_open {
             self.handle_keys(ctx);
@@ -1459,6 +1523,7 @@ impl App {
         // Notice files created or removed outside the app (or by a tool such as Save .crc).
         for p in &mut self.panels {
             p.switch_on_missing = self.options.switch_on_missing_drive;
+            p.show_ext = self.options.ext_column;
             p.refresh_if_changed();
         }
         step("panels refreshed");
@@ -1488,6 +1553,18 @@ impl App {
                     }
                     if ui.button("Search...  (Alt+F7)").clicked() {
                         self.open_search();
+                        ui.close_menu();
+                    }
+                    if ui.button("Compare folders...  (Ctrl+K)").clicked() {
+                        self.open_dir_compare();
+                        ui.close_menu();
+                    }
+                    if ui.button("Compare files...  (Ctrl+Shift+K)").clicked() {
+                        self.open_file_compare();
+                        ui.close_menu();
+                    }
+                    if ui.button("Bookmarks...  (Ctrl+B)").clicked() {
+                        self.bookmarks.open = true;
                         ui.close_menu();
                     }
                 });
@@ -1617,6 +1694,13 @@ impl App {
         self.checksums.show(ctx, &self.themes.active);
         self.search.show(ctx);
         self.handle_search_action(ctx);
+        self.dircmp.show(ctx);
+        self.handle_dircmp_action();
+        let here = self.panels[self.active].disk_folder().map(Path::to_path_buf);
+        self.bookmarks.show(ctx, here.as_deref());
+        if let Some(dir) = self.bookmarks.take_go() {
+            self.panels[self.active].open_root(dir);
+        }
         self.verify.show(ctx, &self.themes.active);
         if let Some(target) = self.ftp_win.show(ctx) {
             self.status = None;
@@ -1629,8 +1713,9 @@ impl App {
         self.editor.show(ctx, self.themes.active.dark);
         self.evtx.show(ctx, self.themes.active.dark);
         self.pdf.show(ctx);
+        self.diff.show(ctx);
         // Ghost Commander waits while one of those windows is open: say so instead of looking dead.
-        let waiting = [(self.viewer.is_open(), "The viewer", "gc_viewer"), (self.editor.is_open(), "The editor", "gc_editor"), (self.evtx.is_open(), "The event log viewer", "gc_evtx"), (self.pdf.is_open(), "The PDF viewer", "gc_pdf")];
+        let waiting = [(self.viewer.is_open(), "The viewer", "gc_viewer"), (self.editor.is_open(), "The editor", "gc_editor"), (self.evtx.is_open(), "The event log viewer", "gc_evtx"), (self.pdf.is_open(), "The PDF viewer", "gc_pdf"), (self.diff.is_open(), "The file compare", "gc_diff")];
         if let Some((_, what, id)) = waiting.into_iter().find(|w| w.0) {
             fullscreen::blocker(ctx, what, egui::ViewportId::from_hash_of(id));
         }

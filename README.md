@@ -58,9 +58,9 @@ Branding lives in `assets/` (`icon.ico` is embedded into the exe by `crates/gc-a
 ## TODO (backlog)
 - Search: regular expressions, search results as a panel listing (feed to panel), saving the search settings.
 - PDF viewer: text search and copying text (the Windows renderer gives pictures only; would need a text layer from a PDF library), continuous scrolling through all pages, thumbnails, rotate.
-- **Compare**: files side by side with coloured differences, and directory compare (only left / only right / different / same), tied to the checksums and to the two-files-side-by-side view.
-- **Multi-rename** (Ctrl+M): mask, counter, regex, preview before it runs. **Bookmarks** (not Ctrl+D, that is DISM) and a history of visited folders.
-- Folder sizes on demand (Space on a folder or Alt+Shift+Enter), counted in parallel. More panel columns (extension, attributes), brief / full view, image thumbnails.
+- Compare: highlight changes inside a line, edit / merge from the diff view, directory synchronisation (copy the differences), compare archives.
+- **Multi-rename** (Ctrl+M): mask, counter, regex, preview before it runs. A history of visited folders.
+- More panel columns (attributes), brief / full view, image thumbnails. Folder sizes inside archives and on FTP servers.
 - Job list: pause and speed limit of running copies; a better conflict dialog (e.g. "overwrite only older").
 - Viewer: "Copy selection" button and Shift+click row selection if selecting with the mouse proves unreliable.
 - Editor: regular expressions in find / replace, find in files, auto-indent of a new line, Ctrl+/ to comment, bracket matching.
@@ -78,6 +78,14 @@ Branding lives in `assets/` (`icon.ico` is embedded into the exe by `crates/gc-a
 
 **Release**
 - Releases are signed (Certum certificate, signtool + RFC 3161 timestamp) and published as `ghost-commander-vX-windows-x64.zip` and `-winpe-x64.zip`. Still open: an installer and a CI signing step.
+
+## Compare, bookmarks, folder sizes
+
+- **Ctrl+K** (Tools > Compare folders) compares the folders of both panels, optionally with all sub-folders: only left, only right, different, same (filter checkboxes with counts). Files differ when size or time (2 s or more) differ; "Compare content" also reads same-size files byte by byte. Enter / double click on a different pair opens the file compare, "Mark differences in panels" marks the differing items of both panels.
+- **Ctrl+Shift+K** (Tools > Compare files) shows two text files side by side with the differences coloured (changed / only left / only right, line numbers). N / P (or the buttons) jump to the next / previous difference, "Ignore white space" and "Ignore case" are checkboxes. Uses the cursor files of both panels, or two marked files of the active panel. Binary files are compared byte by byte; files over 16 MB are not compared.
+- **Ctrl+B** (Tools > Bookmarks) lists bookmarked folders: Enter / double click shows one in the active panel, Ins adds the current folder, Del removes, the arrows reorder. Saved in `settings.toml`.
+- **Folder sizes**: Space on a folder marks it and works out its size (counted in parallel, shown instead of `<DIR>`); **Alt+Shift+Enter** does it for the marked folders or, with nothing marked, for all folders of the panel. Sorting by size then uses them.
+- **Extension column**: Config > Options > "Show the extension in its own column" splits the name and the extension; click the Ext heading (or Ctrl+F4) to sort by it.
 
 ## Themes and file icons
 

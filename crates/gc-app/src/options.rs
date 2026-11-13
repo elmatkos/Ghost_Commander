@@ -10,13 +10,14 @@ pub struct Options {
     pub drive_free_bar: bool,
     pub switch_on_missing_drive: bool,
     pub pdf_turn_pages: bool,
+    pub ext_column: bool,
     error: Option<String>,
 }
 
 impl Options {
     pub fn load() -> Self {
         let s = load_settings();
-        Self { open: false, drive_buttons: s.drive_buttons, drive_free_bar: s.drive_free_bar, switch_on_missing_drive: s.switch_on_missing_drive, pdf_turn_pages: s.pdf_turn_pages, error: None }
+        Self { open: false, drive_buttons: s.drive_buttons, drive_free_bar: s.drive_free_bar, switch_on_missing_drive: s.switch_on_missing_drive, pdf_turn_pages: s.pdf_turn_pages, ext_column: s.ext_column, error: None }
     }
 
     pub fn show(&mut self, ctx: &egui::Context) {
@@ -34,6 +35,13 @@ impl Options {
             });
             ui.add_space(2.0);
             ui.weak("Also adds \\ (root of the drive) and .. (parent folder) buttons.");
+            ui.add_space(10.0);
+            ui.heading("Panels");
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                changed |= ui.checkbox(&mut self.ext_column, "Show the extension in its own column").changed();
+                info_icon(ui).on_hover_text("Off: the extension is part of the name.\nOn: the name is shown without it and the extension has a column between Name and Size (click its heading to sort by it, Ctrl+F4).");
+            });
             ui.add_space(10.0);
             ui.heading("When a drive disappears");
             ui.add_space(4.0);
@@ -68,6 +76,7 @@ impl Options {
             s.drive_free_bar = self.drive_free_bar;
             s.switch_on_missing_drive = self.switch_on_missing_drive;
             s.pdf_turn_pages = self.pdf_turn_pages;
+            s.ext_column = self.ext_column;
             crate::prefs::set_pdf_turn_pages_cached(self.pdf_turn_pages);
             self.error = save_settings(&s).err().map(|e| format!("Cannot save settings: {e}"));
         }

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -110,6 +110,11 @@ pub struct Panel {
     last_height: f32,
     /// Modified time of the folder when it was last read (to notice files created elsewhere).
     stamp: Option<std::time::SystemTime>,
+    /// Set by the app from Config > Options: show the extension in its own column.
+    pub show_ext: bool,
+    /// Sizes of folders worked out on request (Space on a folder, Alt+Shift+Enter).
+    dir_sizes: HashMap<PathBuf, u64>,
+    size_work: Vec<(PathBuf, Receiver<u64>)>,
 }
 
 impl Panel {
@@ -141,6 +146,9 @@ impl Panel {
             last_offset: 0.0,
             last_height: 0.0,
             stamp: None,
+            show_ext: false,
+            dir_sizes: HashMap::new(),
+            size_work: Vec::new(),
         };
         p.reload();
         p
@@ -179,7 +187,12 @@ impl Panel {
             None => list_dir(&self.cwd),
         };
         match listing {
-            Ok(entries) => {
+            Ok(mut entries) => {
+                for e in entries.iter_mut().filter(|e| e.is_dir) {
+                    if let Some(s) = self.dir_sizes.get(&e.path) {
+                        e.size = *s;
+                    }
+                }
                 self.listing = entries;
                 self.error = None;
             }
@@ -280,13 +293,82 @@ impl Panel {
         ((self.last_height / ROW_H) as isize - 1).max(1)
     }
 
+    /// Marks the entries with these (lower-case) names (used by directory compare).
+    pub fn mark_names(&mut self, names: &HashSet<String>) {
+        self.marked.clear();
+        for e in self.entries.iter().filter(|e| e.name != PARENT && names.contains(&e.name.to_lowercase())) {
+            self.marked.insert(e.path.clone());
+        }
+    }
+
     pub fn toggle_mark_and_advance(&mut self) {
         if let Some(e) = self.entries.get(self.cursor).filter(|e| e.name != PARENT) {
             if !self.marked.remove(&e.path) {
                 self.marked.insert(e.path.clone());
+                // Like Total Commander: marking a folder works out how big it is.
+                if e.is_dir {
+                    let p = e.path.clone();
+                    self.start_size(p);
+                }
             }
         }
         self.move_cursor(1);
+    }
+
+    /// Works out the size of a folder on a worker thread (folders on disk only).
+    fn start_size(&mut self, path: PathBuf) {
+        if self.archive.is_some() || self.ftp.is_some() || self.dir_sizes.contains_key(&path) || self.size_work.iter().any(|(p, _)| *p == path) {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        let ctx = self.ctx.clone();
+        let p = path.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(dir_size(&p));
+            ctx.request_repaint();
+        });
+        self.size_work.push((path, rx));
+    }
+
+    /// Alt+Shift+Enter: sizes of the marked folders, or of all folders when none is marked.
+    pub fn calc_sizes(&mut self) {
+        let marked: Vec<PathBuf> = self.entries.iter().filter(|e| e.is_dir && e.name != PARENT && self.marked.contains(&e.path)).map(|e| e.path.clone()).collect();
+        let list: Vec<PathBuf> = if marked.is_empty() { self.entries.iter().filter(|e| e.is_dir && e.name != PARENT).map(|e| e.path.clone()).collect() } else { marked };
+        for p in list {
+            self.dir_sizes.remove(&p);
+            self.start_size(p);
+        }
+    }
+
+    /// Takes in the folder sizes that have been worked out.
+    fn poll_sizes(&mut self) {
+        if self.size_work.is_empty() {
+            return;
+        }
+        let mut done = Vec::new();
+        self.size_work.retain(|(path, rx)| match rx.try_recv() {
+            Ok(size) => {
+                done.push((path.clone(), size));
+                false
+            }
+            Err(TryRecvError::Empty) => true,
+            Err(TryRecvError::Disconnected) => false,
+        });
+        if done.is_empty() {
+            return;
+        }
+        for (path, size) in done {
+            self.dir_sizes.insert(path.clone(), size);
+            for e in self.listing.iter_mut().chain(self.entries.iter_mut()).filter(|e| e.path == path) {
+                e.size = size;
+            }
+        }
+        if self.sort == SortKey::Size {
+            let keep = self.entries.get(self.cursor).map(|e| e.name.clone());
+            sort_entries(&mut self.listing, self.sort, self.sort_desc);
+            self.apply_view(keep);
+            self.scroll_to_cursor = false;
+        }
     }
 
     /// Opens the folder or archive under the cursor (or goes up on the `..` row).
@@ -340,6 +422,7 @@ impl Panel {
 
     /// Picks up a finished archive open; called every frame.
     pub fn poll(&mut self) {
+        self.poll_sizes();
         self.poll_ftp();
         let Some(l) = &self.loading else { return };
         let result = match l.rx.try_recv() {
@@ -364,6 +447,8 @@ impl Panel {
 
     /// Fresh listing at the top of a new location.
     fn enter_listing(&mut self) {
+        self.dir_sizes.clear();
+        self.size_work.clear();
         self.entries.clear();
         self.cursor = 0;
         self.marked.clear();
@@ -721,6 +806,7 @@ impl Panel {
             for c in counters {
                 if e.is_dir {
                     c.1 += 1;
+                    c.2 += e.size;
                 } else {
                     c.0 += 1;
                     c.2 += e.size;
@@ -735,11 +821,17 @@ impl Panel {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), HEADER_H), Sense::hover());
         let right = rect.right() - 6.0;
         let size_right = right - DATE_COL_W;
-        let zones = [
-            (SortKey::Name, "Name", Align2::LEFT_CENTER, rect.left() + 6.0 + ICON_COL_W, rect.left(), size_right - 90.0),
+        let ext_w = if self.show_ext { EXT_COL_W } else { 0.0 };
+        let name_end = size_right - 90.0 - ext_w;
+        let ext_zone = (SortKey::Ext, "Ext", Align2::LEFT_CENTER, name_end + 6.0, name_end, size_right - 90.0);
+        let mut zones = vec![
+            (SortKey::Name, "Name", Align2::LEFT_CENTER, rect.left() + 6.0 + ICON_COL_W, rect.left(), name_end),
             (SortKey::Size, "Size", Align2::RIGHT_CENTER, size_right, size_right - 90.0, size_right + 4.0),
             (SortKey::Date, "Date", Align2::RIGHT_CENTER, right, size_right + 4.0, rect.right()),
         ];
+        if self.show_ext {
+            zones.insert(1, ext_zone);
+        }
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 2.0, ui.visuals().faint_bg_color);
         for (key, label, align, x, from, to) in zones {
@@ -909,18 +1001,29 @@ impl Panel {
                 let (glyph, glyph_color) = theme.style(theme.category_of(e));
                 let left = rect.left_center() + egui::vec2(6.0, 0.0);
                 painter.text(left, Align2::LEFT_CENTER, glyph, FontId::proportional(15.0), glyph_color);
-                let name = if e.is_dir { format!("[{}]", e.name) } else { e.name.clone() };
+                let ext_w = if self.show_ext { EXT_COL_W } else { 0.0 };
+                let (stem, ext) = if self.show_ext && !e.is_dir { split_ext(&e.name) } else { (e.name.as_str(), "") };
+                let name = if e.is_dir { format!("[{}]", e.name) } else { stem.to_owned() };
                 // a long name must not run into the size and date columns: shorten it in the middle
-                let name_w = (rect.right() - 6.0 - DATE_COL_W - 90.0) - (left.x + ICON_COL_W);
+                let name_w = (rect.right() - 6.0 - DATE_COL_W - 90.0 - ext_w) - (left.x + ICON_COL_W);
                 let char_w = ui.fonts(|f| f.glyph_width(&font, 'M'));
                 let name = shorten_middle(&name, (name_w / char_w) as usize);
                 painter.text(left + egui::vec2(ICON_COL_W, 0.0), Align2::LEFT_CENTER, name, font.clone(), color);
                 let right = rect.right_center() - egui::vec2(6.0, 0.0);
+                if self.show_ext && !ext.is_empty() {
+                    painter.text(egui::pos2(rect.right() - 6.0 - DATE_COL_W - 90.0 - ext_w + 6.0, rect.center().y), Align2::LEFT_CENTER, ext, font.clone(), color);
+                }
                 if let Some(t) = e.modified {
                     let date = chrono::DateTime::<chrono::Local>::from(t).format("%Y-%m-%d %H:%M").to_string();
                     painter.text(right, Align2::RIGHT_CENTER, date, font.clone(), color);
                 }
-                let size = if e.is_dir { "<DIR>".to_owned() } else { fmt_size(e.size) };
+                let size = if !e.is_dir || self.dir_sizes.contains_key(&e.path) {
+                    fmt_size(e.size)
+                } else if self.size_work.iter().any(|(p, _)| *p == e.path) {
+                    "...".to_owned()
+                } else {
+                    "<DIR>".to_owned()
+                };
                 painter.text(right - egui::vec2(DATE_COL_W, 0.0), Align2::RIGHT_CENTER, size, font, color);
             }
         });
@@ -930,6 +1033,22 @@ impl Panel {
         self.show_status(ui, theme);
         clicked
     }
+}
+
+/// Total size of the files in a folder, the sub-folders worked on in parallel.
+fn dir_size(dir: &Path) -> u64 {
+    use rayon::prelude::*;
+    let Ok(rd) = std::fs::read_dir(dir) else { return 0 };
+    let items: Vec<std::fs::DirEntry> = rd.filter_map(|e| e.ok()).collect();
+    items
+        .par_iter()
+        .map(|e| match e.file_type() {
+            Ok(t) if t.is_symlink() => 0,
+            Ok(t) if t.is_dir() => dir_size(&e.path()),
+            Ok(_) => e.metadata().map(|m| m.len()).unwrap_or(0),
+            Err(_) => 0,
+        })
+        .sum()
 }
 
 fn join_inner(inner: &str, name: &str) -> String {
@@ -963,7 +1082,6 @@ fn sort_entries(list: &mut [Entry], key: SortKey, desc: bool) {
                     let ext = |e: &Entry| if e.is_dir { String::new() } else { gc_core::filetype::extension_of(&e.path).unwrap_or_default() };
                     ext(a).cmp(&ext(b)).then_with(|| name_order(a, b))
                 }
-                SortKey::Size if a.is_dir => name_order(a, b),
                 SortKey::Size => a.size.cmp(&b.size).then_with(|| name_order(a, b)),
                 SortKey::Date => a.modified.cmp(&b.modified).then_with(|| name_order(a, b)),
             };
@@ -997,6 +1115,16 @@ fn shorten_middle(name: &str, max: usize) -> String {
 }
 
 const ICON_COL_W: f32 = 22.0;
+/// Width of the optional extension column.
+const EXT_COL_W: f32 = 56.0;
+
+/// `name.ext` -> (`name`, `ext`); a leading dot (`.gitignore`) is part of the name.
+fn split_ext(name: &str) -> (&str, &str) {
+    match name.rfind('.') {
+        Some(i) if i > 0 && i + 1 < name.len() => (&name[..i], &name[i + 1..]),
+        _ => (name, ""),
+    }
+}
 /// Width reserved for the "YYYY-MM-DD HH:MM" column plus a gap.
 const DATE_COL_W: f32 = 140.0;
 
@@ -1208,6 +1336,36 @@ mod tests {
         p.enter(); // into zdir
         assert!(p.filter.is_empty(), "a new folder starts unfiltered");
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn folder_sizes_are_worked_out_on_request_and_survive_a_reload() {
+        let root = scratch_dir("dirsize");
+        std::fs::write(root.join("zdir").join("f.bin"), vec![0u8; 1000]).unwrap();
+        std::fs::create_dir(root.join("zdir").join("deep")).unwrap();
+        std::fs::write(root.join("zdir").join("deep").join("g.bin"), vec![0u8; 234]).unwrap();
+        let mut p = new_panel(&root);
+        p.calc_sizes();
+        for _ in 0..200 {
+            p.poll();
+            if p.size_work.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let size = |p: &Panel| p.entries.iter().find(|e| e.name == "zdir").unwrap().size;
+        assert_eq!(size(&p), 1234);
+        p.reload();
+        assert_eq!(size(&p), 1234);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn extension_is_split_off_unless_it_is_a_dotfile() {
+        assert_eq!(super::split_ext("a.tar.gz"), ("a.tar", "gz"));
+        assert_eq!(super::split_ext(".gitignore"), (".gitignore", ""));
+        assert_eq!(super::split_ext("noext"), ("noext", ""));
+        assert_eq!(super::split_ext("trailing."), ("trailing.", ""));
     }
 
     #[test]
