@@ -2,6 +2,8 @@
 //! into coloured spans. Only the state at the start of a line (inside a block comment, a here-string,
 //! ...) has to be carried from line to line, so a viewer can colour just the rows it shows.
 
+mod data;
+
 use std::ops::Range;
 use std::path::Path;
 
@@ -15,6 +17,11 @@ pub enum Lang {
     PowerShell,
     Rust,
     Python,
+    Json,
+    Xml,
+    Ini,
+    Markdown,
+    Batch,
 }
 
 impl Lang {
@@ -26,6 +33,11 @@ impl Lang {
             Lang::PowerShell => "PowerShell",
             Lang::Rust => "Rust",
             Lang::Python => "Python",
+            Lang::Json => "JSON",
+            Lang::Xml => "XML",
+            Lang::Ini => "INI",
+            Lang::Markdown => "Markdown",
+            Lang::Batch => "Batch",
         }
     }
 }
@@ -40,6 +52,11 @@ pub fn detect(path: &Path) -> Option<Lang> {
         "ps1" | "psm1" | "psd1" => Lang::PowerShell,
         "rs" => Lang::Rust,
         "py" | "pyw" => Lang::Python,
+        "json" | "jsonc" => Lang::Json,
+        "xml" | "xaml" | "html" | "htm" | "xhtml" | "svg" | "xsd" | "xsl" | "xslt" | "csproj" | "vcxproj" | "props" | "targets" | "config" | "resx" | "manifest" => Lang::Xml,
+        "ini" | "cfg" | "conf" | "inf" | "toml" | "properties" | "reg" => Lang::Ini,
+        "md" | "markdown" => Lang::Markdown,
+        "bat" | "cmd" => Lang::Batch,
         _ => return None,
     })
 }
@@ -70,6 +87,10 @@ pub enum State {
     Triple(u8),
     /// C# verbatim string (`@"..."`, `""` is an escaped quote).
     Verbatim,
+    /// Markdown fenced code block.
+    Fence,
+    /// XML / HTML: inside a tag (attributes go on in the next line).
+    Tag,
 }
 
 pub type Span = (Range<usize>, Kind);
@@ -120,6 +141,9 @@ const RS_TY: &[&str] = &["i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16"
 const PY_KW: &[&str] = &[
     "and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del", "elif", "else", "except", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while", "with", "yield", "True", "False", "None", "match", "case",
 ];
+const BAT_KW: &[&str] = &[
+    "if", "else", "for", "in", "do", "goto", "call", "exit", "set", "setlocal", "endlocal", "echo", "pause", "shift", "not", "exist", "defined", "errorlevel", "equ", "neq", "lss", "leq", "gtr", "geq", "start", "cd", "chdir", "type", "copy", "xcopy", "robocopy", "move", "del", "erase", "mkdir", "md", "rmdir", "rd", "ren", "rename", "dir", "cls", "title", "color", "pushd", "popd", "choice", "timeout", "find", "findstr", "off", "on", "enabledelayedexpansion", "disabledelayedexpansion",
+];
 const PY_TY: &[&str] = &["int", "str", "float", "bool", "list", "dict", "set", "tuple", "bytes", "object", "self", "cls"];
 
 fn keywords(lang: Lang) -> &'static [&'static str] {
@@ -130,6 +154,7 @@ fn keywords(lang: Lang) -> &'static [&'static str] {
         Lang::PowerShell => PS_KW,
         Lang::Rust => RS_KW,
         Lang::Python => PY_KW,
+        _ => &[],
     }
 }
 
@@ -141,6 +166,7 @@ fn types(lang: Lang) -> &'static [&'static str] {
         Lang::PowerShell => &[],
         Lang::Rust => RS_TY,
         Lang::Python => PY_TY,
+        _ => &[],
     }
 }
 
@@ -203,6 +229,14 @@ fn push(out: &mut Vec<Span>, r: Range<usize>, k: Kind) {
 
 /// Colours one line. `st` is what the line starts inside of; the returned state is for the next line.
 pub fn scan(lang: Lang, line: &str, mut st: State) -> (Vec<Span>, State) {
+    match lang {
+        Lang::Json => return data::scan_json(line, st),
+        Lang::Xml => return data::scan_xml(line, st),
+        Lang::Ini => return (data::scan_ini(line), State::Normal),
+        Lang::Markdown => return data::scan_markdown(line, st),
+        Lang::Batch => return (data::scan_batch(line), State::Normal),
+        _ => {}
+    }
     let b = line.as_bytes();
     let n = b.len();
     let mut out: Vec<Span> = Vec::new();
@@ -210,7 +244,7 @@ pub fn scan(lang: Lang, line: &str, mut st: State) -> (Vec<Span>, State) {
     let ps = lang == Lang::PowerShell;
 
     match st {
-        State::Normal => {}
+        State::Normal | State::Fence | State::Tag => {}
         State::Block => match find(b, 0, if ps { b"#>" } else { b"*/" }) {
             Some(p) => {
                 push(&mut out, 0..p + 2, Kind::Comment);
@@ -576,5 +610,9 @@ mod tests {
         assert_eq!(detect(Path::new("a/B.CPP")), Some(Lang::Cpp));
         assert_eq!(detect(Path::new("x.ps1")), Some(Lang::PowerShell));
         assert_eq!(detect(Path::new("notes.txt")), None);
+        assert_eq!(detect(Path::new("a.JSON")), Some(Lang::Json));
+        assert_eq!(detect(Path::new("a.csproj")), Some(Lang::Xml));
+        assert_eq!(detect(Path::new("README.md")), Some(Lang::Markdown));
+        assert_eq!(detect(Path::new("run.cmd")), Some(Lang::Batch));
     }
 }

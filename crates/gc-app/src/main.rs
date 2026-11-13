@@ -16,6 +16,7 @@ mod panel;
 mod shell_menu;
 mod sysinfo_window;
 mod syntax;
+mod textenc;
 mod tabs;
 mod theme;
 mod theme_editor;

@@ -1,7 +1,8 @@
-//! F4 text editor: a window around egui's multi-line `TextEdit` with syntax colours (see `syntax`),
+//! F4 text editor: a full-window page around egui's multi-line `TextEdit` with syntax colours (see `syntax`),
 //! line numbers, Ctrl+S, find / replace and a keep-or-discard question when closing a changed file.
-//! Keeps the file's encoding (UTF-8, UTF-8 with BOM, UTF-16 with BOM) and line endings. Big or
-//! binary files are not opened here (`open` returns `Ok(false)`: the caller falls back to Notepad).
+//! Keeps the file's encoding (UTF-8, UTF-8 with BOM, UTF-16 with BOM, Windows-1250; changeable) and line
+//! endings, has its own undo / redo and go to line (Ctrl+G). Big or binary files are not opened here
+//! (`open` returns `Ok(false)`: the caller falls back to Notepad).
 
 use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
@@ -16,6 +17,7 @@ use eframe::egui::{
 };
 
 use crate::syntax::{self, Lang, State};
+use crate::textenc::{self, Enc};
 
 /// Bigger files go to Notepad: the whole text is coloured and hashed on every change.
 const MAX_BYTES: u64 = 2 * 1024 * 1024;
@@ -23,25 +25,6 @@ const FONT_SIZE: f32 = 13.0;
 /// Inserted by the Tab key.
 static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 const TAB: &str = "    ";
-
-#[derive(Clone, Copy, PartialEq)]
-enum Enc {
-    Utf8,
-    Utf8Bom,
-    Utf16Le,
-    Utf16Be,
-}
-
-impl Enc {
-    fn name(self) -> &'static str {
-        match self {
-            Enc::Utf8 => "UTF-8",
-            Enc::Utf8Bom => "UTF-8 BOM",
-            Enc::Utf16Le => "UTF-16 LE",
-            Enc::Utf16Be => "UTF-16 BE",
-        }
-    }
-}
 
 #[derive(Default)]
 pub struct Editor {
@@ -75,37 +58,23 @@ struct Doc {
     serial: u64,
     scroll_y: f32,
     page: f32,
+    /// Encoding or line ends were changed (the file counts as modified).
+    format_dirty: bool,
+    undo: Vec<String>,
+    redo: Vec<String>,
+    /// The text as of the last recorded edit, and its hash.
+    prev_text: String,
+    prev_hash: u64,
+    last_edit: Option<std::time::Instant>,
+    goto_open: bool,
+    focus_goto: bool,
+    goto_q: String,
 }
 
 fn hash(s: &str) -> u64 {
     let mut h = DefaultHasher::new();
     s.hash(&mut h);
     h.finish()
-}
-
-fn decode(b: &[u8]) -> Option<(String, Enc)> {
-    if let Some(r) = b.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
-        return String::from_utf8(r.to_vec()).ok().map(|s| (s, Enc::Utf8Bom));
-    }
-    if b.starts_with(&[0xFF, 0xFE]) || b.starts_with(&[0xFE, 0xFF]) {
-        let le = b[0] == 0xFF;
-        let units: Vec<u16> = b[2..].chunks_exact(2).map(|c| if le { u16::from_le_bytes([c[0], c[1]]) } else { u16::from_be_bytes([c[0], c[1]]) }).collect();
-        return String::from_utf16(&units).ok().map(|s| (s, if le { Enc::Utf16Le } else { Enc::Utf16Be }));
-    }
-    if b.contains(&0) {
-        return None;
-    }
-    String::from_utf8(b.to_vec()).ok().map(|s| (s, Enc::Utf8))
-}
-
-fn encode(text: &str, crlf: bool, enc: Enc) -> Vec<u8> {
-    let text: Cow<str> = if crlf { Cow::Owned(text.replace('\n', "\r\n")) } else { Cow::Borrowed(text) };
-    match enc {
-        Enc::Utf8 => text.as_bytes().to_vec(),
-        Enc::Utf8Bom => [&[0xEF, 0xBB, 0xBF][..], text.as_bytes()].concat(),
-        Enc::Utf16Le => [0xFF, 0xFE].into_iter().chain(text.encode_utf16().flat_map(u16::to_le_bytes)).collect(),
-        Enc::Utf16Be => [0xFE, 0xFF].into_iter().chain(text.encode_utf16().flat_map(u16::to_be_bytes)).collect(),
-    }
 }
 
 fn byte_of(text: &str, chars: usize) -> usize {
@@ -194,13 +163,21 @@ fn job_for(text: &str, lang: Option<Lang>, dark: bool, plain: Color32) -> Layout
 
 impl Doc {
     fn modified(&self) -> bool {
-        hash(&self.text) != self.saved
+        self.format_dirty || hash(&self.text) != self.saved
     }
 
     fn save(&mut self) -> bool {
-        match std::fs::write(&self.path, encode(&self.text, self.crlf, self.enc)) {
+        let bytes = match textenc::encode(&self.text, self.crlf, self.enc) {
+            Ok(b) => b,
+            Err(c) => {
+                self.msg = format!("'{c}' cannot be saved as {}: pick another encoding.", self.enc.name());
+                return false;
+            }
+        };
+        match std::fs::write(&self.path, bytes) {
             Ok(()) => {
                 self.saved = hash(&self.text);
+                self.format_dirty = false;
                 self.msg = "Saved.".into();
                 true
             }
@@ -209,6 +186,67 @@ impl Doc {
                 false
             }
         }
+    }
+
+    /// Notes a change of the text made since the last frame; typing in a burst is one undo step.
+    fn record_edit(&mut self) {
+        let h = hash(&self.text);
+        if h == self.prev_hash {
+            return;
+        }
+        let burst = self.last_edit.is_some_and(|t| t.elapsed().as_millis() < 1000);
+        if !burst {
+            self.undo.push(std::mem::take(&mut self.prev_text));
+            if self.undo.len() > 200 {
+                self.undo.remove(0);
+            }
+        }
+        self.redo.clear();
+        self.prev_text = self.text.clone();
+        self.prev_hash = h;
+        self.last_edit = Some(std::time::Instant::now());
+    }
+
+    /// After undo / redo: the cursor goes to the first place that differs.
+    fn after_history(&mut self, ctx: &egui::Context, id: Id, old: &str, row_h: f32, page: f32) {
+        let mut p = old.bytes().zip(self.text.bytes()).take_while(|(a, b)| a == b).count();
+        while !self.text.is_char_boundary(p) {
+            p -= 1;
+        }
+        set_selection(ctx, id, &self.text, p, p);
+        self.scroll_to(p, row_h, page);
+        self.prev_text = self.text.clone();
+        self.prev_hash = hash(&self.text);
+        self.last_edit = None;
+    }
+
+    fn undo(&mut self, ctx: &egui::Context, id: Id, row_h: f32, page: f32) {
+        if let Some(prev) = self.undo.pop() {
+            let cur = std::mem::replace(&mut self.text, prev);
+            self.redo.push(cur.clone());
+            self.after_history(ctx, id, &cur, row_h, page);
+        }
+    }
+
+    fn redo(&mut self, ctx: &egui::Context, id: Id, row_h: f32, page: f32) {
+        if let Some(next) = self.redo.pop() {
+            let cur = std::mem::replace(&mut self.text, next);
+            self.undo.push(cur.clone());
+            self.after_history(ctx, id, &cur, row_h, page);
+        }
+    }
+
+    fn go_to_line(&mut self, ctx: &egui::Context, id: Id, row_h: f32, page: f32) {
+        let Ok(l) = self.goto_q.trim().parse::<usize>() else {
+            self.msg = "Type a line number.".into();
+            return;
+        };
+        let last = self.text.matches('\n').count();
+        let line = l.clamp(1, last + 1) - 1;
+        let start = if line == 0 { 0 } else { self.text.match_indices('\n').nth(line - 1).map(|(i, _)| i + 1).unwrap_or(0) };
+        set_selection(ctx, id, &self.text, start, start);
+        self.scroll_to(start, row_h, page);
+        self.msg.clear();
     }
 
     fn scroll_to(&mut self, byte: usize, row_h: f32, page: f32) {
@@ -233,6 +271,7 @@ impl Doc {
         let selected = self.text.get(a..b).unwrap_or("");
         let same = if self.case { selected == self.find_q } else { selected.eq_ignore_ascii_case(&self.find_q) };
         if a < b && same {
+            self.last_edit = None;
             self.text.replace_range(a..b, &self.repl);
             let end = a + self.repl.len();
             set_selection(ctx, id, &self.text, end, end);
@@ -243,6 +282,7 @@ impl Doc {
     fn replace_everything(&mut self) {
         let (t, n) = replace_all(&self.text, &self.find_q, &self.repl, self.case);
         self.msg = format!("{n} replaced.");
+        self.last_edit = None;
         self.text = t;
     }
 }
@@ -257,10 +297,11 @@ impl Editor {
         if std::fs::metadata(path)?.len() > MAX_BYTES {
             return Ok(false);
         }
-        let Some((text, enc)) = decode(&std::fs::read(path)?) else { return Ok(false) };
+        let Some((text, enc)) = textenc::decode(&std::fs::read(path)?) else { return Ok(false) };
         let crlf = text.contains("\r\n");
         let text = if crlf { text.replace("\r\n", "\n") } else { text };
         let saved = hash(&text);
+        let text_copy = text.clone();
         self.doc = Some(Doc {
             path: path.to_path_buf(),
             name: path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
@@ -283,6 +324,15 @@ impl Editor {
             serial: SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             scroll_y: 0.0,
             page: 400.0,
+            format_dirty: false,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            prev_hash: saved,
+            prev_text: text_copy,
+            last_edit: None,
+            goto_open: false,
+            focus_goto: false,
+            goto_q: String::new(),
         });
         Ok(true)
     }
@@ -293,7 +343,14 @@ impl Editor {
         let row_h = ctx.fonts(|f| f.row_height(&FontId::monospace(FONT_SIZE)));
         let modified = d.modified();
 
-        let (ctrl_s, ctrl_f, esc, f3) = ctx.input(|i| (i.modifiers.command && i.key_pressed(Key::S), i.modifiers.command && i.key_pressed(Key::F), i.key_pressed(Key::Escape), i.key_pressed(Key::F3)));
+        let (ctrl_s, ctrl_f, ctrl_g, esc, f3) = ctx.input(|i| (i.modifiers.command && i.key_pressed(Key::S), i.modifiers.command && i.key_pressed(Key::F), i.modifiers.command && i.key_pressed(Key::G), i.key_pressed(Key::Escape), i.key_pressed(Key::F3)));
+        // Our own undo / redo (also while another field has the focus; replace and Tab are covered too).
+        let (redo, undo) = ctx.input_mut(|i| (i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z) | i.consume_key(Modifiers::COMMAND, Key::Y), i.consume_key(Modifiers::COMMAND, Key::Z)));
+        if redo {
+            d.redo(ctx, id, row_h, d.page);
+        } else if undo {
+            d.undo(ctx, id, row_h, d.page);
+        }
         let mut want_close = false;
         if ctrl_s {
             d.save();
@@ -302,9 +359,14 @@ impl Editor {
             d.find_open = true;
             d.focus_find = true;
         }
+        if ctrl_g {
+            d.goto_open = true;
+            d.focus_goto = true;
+        }
         if esc && !d.confirm {
-            if d.find_open {
+            if d.find_open || d.goto_open {
                 d.find_open = false;
+                d.goto_open = false;
             } else {
                 want_close = true;
             }
@@ -312,6 +374,7 @@ impl Editor {
         // Tab inserts spaces (lock_focus keeps egui from moving the focus away).
         if ctx.memory(|m| m.has_focus(id)) && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Tab)) {
             let (a, b) = selection(ctx, id, &d.text);
+            d.last_edit = None;
             d.text.replace_range(a..b, TAB);
             set_selection(ctx, id, &d.text, a + TAB.len(), a + TAB.len());
         }
@@ -350,6 +413,7 @@ impl Editor {
             }
             None => (1, 1),
         };
+        let page_prev = d.page;
         let mut page = 400.0;
         let mut scroll_y = 0.0;
         let title = format!("Edit: {}{}{}", d.name, d.lang.map(|l| format!("  [{}]", l.name())).unwrap_or_default(), if modified { "  *" } else { "" });
@@ -362,7 +426,31 @@ impl Editor {
                     d.find_open = !d.find_open;
                     d.focus_find = d.find_open;
                 }
-                ui.weak(format!("Ln {line}, Col {col}   {}   {}", d.enc.name(), if d.crlf { "CRLF" } else { "LF" }));
+                if ui.add_enabled(!d.undo.is_empty(), egui::Button::new("Undo")).on_hover_text("Ctrl+Z").clicked() {
+                    d.undo(ctx, id, row_h, page_prev);
+                }
+                if ui.add_enabled(!d.redo.is_empty(), egui::Button::new("Redo")).on_hover_text("Ctrl+Y or Ctrl+Shift+Z").clicked() {
+                    d.redo(ctx, id, row_h, page_prev);
+                }
+                if ui.button("Go to line  (Ctrl+G)").clicked() {
+                    d.goto_open = !d.goto_open;
+                    d.focus_goto = d.goto_open;
+                }
+                ui.weak(format!("Ln {line}, Col {col}"));
+                let before = (d.enc, d.crlf);
+                egui::ComboBox::from_id_salt("editor_enc").selected_text(d.enc.name()).show_ui(ui, |ui| {
+                    for e in Enc::ALL {
+                        ui.selectable_value(&mut d.enc, e, e.name());
+                    }
+                });
+                egui::ComboBox::from_id_salt("editor_eol").selected_text(if d.crlf { "CRLF" } else { "LF" }).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut d.crlf, false, "LF");
+                    ui.selectable_value(&mut d.crlf, true, "CRLF");
+                });
+                if before != (d.enc, d.crlf) {
+                    d.format_dirty = true;
+                    d.msg = "Saved in the new format with the next Ctrl+S.".into();
+                }
                 if !d.msg.is_empty() {
                     ui.label(&d.msg);
                 }
@@ -376,6 +464,7 @@ impl Editor {
                     }
                     if ui.button("Discard changes").clicked() {
                         d.saved = hash(&d.text);
+                        d.format_dirty = false;
                         d.confirm = false;
                         want_close = true;
                     }
@@ -385,6 +474,20 @@ impl Editor {
                 });
             }
             page = ui.available_height();
+            if d.goto_open {
+                ui.horizontal(|ui| {
+                    ui.label("Line");
+                    let g = ui.add(TextEdit::singleline(&mut d.goto_q).id(Id::new("editor_goto")).desired_width(100.0));
+                    if std::mem::take(&mut d.focus_goto) {
+                        g.request_focus();
+                    }
+                    let enter = g.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                    if ui.button("Go").clicked() || enter {
+                        d.go_to_line(ctx, id, row_h, page);
+                        d.goto_open = false;
+                    }
+                });
+            }
             if d.find_open {
                 ui.horizontal(|ui| {
                     ui.label("Find");
@@ -456,6 +559,7 @@ impl Editor {
         });
         d.page = page;
         d.scroll_y = scroll_y;
+        d.record_edit();
         if closed {
             want_close = true;
         }
@@ -472,18 +576,6 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn encodings_round_trip() {
-        for enc in [Enc::Utf8, Enc::Utf8Bom, Enc::Utf16Le, Enc::Utf16Be] {
-            let bytes = encode("a\nž€\n", true, enc);
-            let (text, got) = decode(&bytes).unwrap();
-            assert!(got == enc);
-            assert_eq!(text, "a\r\nž€\r\n");
-        }
-        assert!(decode(b"MZ\0\0").is_none());
-        assert!(decode(&[0xFF, 0x41]).is_none());
-    }
 
     #[test]
     fn find_and_replace() {
