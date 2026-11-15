@@ -21,7 +21,7 @@ struct ArchiveView {
 
 /// An archive being opened on a worker thread.
 struct Loading {
-    rx: Receiver<io::Result<ArchiveIndex>>,
+    rx: Receiver<io::Result<Arc<ArchiveIndex>>>,
     label: String,
     /// Opened from inside the current archive (keeps the current one on the stack).
     nested: bool,
@@ -115,6 +115,16 @@ pub struct Panel {
     /// Sizes of folders worked out on request (Space on a folder, Alt+Shift+Enter).
     dir_sizes: HashMap<PathBuf, u64>,
     size_work: Vec<(PathBuf, Receiver<u64>)>,
+    /// Tells when something in the shown folder changed (Windows change notification).
+    watch: Option<Watch>,
+    last_reload: std::time::Instant,
+}
+
+/// A change watcher on the folder a panel shows.
+struct Watch {
+    dir: PathBuf,
+    dirty: Arc<std::sync::atomic::AtomicBool>,
+    _watcher: notify::RecommendedWatcher,
 }
 
 impl Panel {
@@ -149,6 +159,8 @@ impl Panel {
             show_ext: false,
             dir_sizes: HashMap::new(),
             size_work: Vec::new(),
+            watch: None,
+            last_reload: std::time::Instant::now(),
         };
         p.reload();
         p
@@ -167,13 +179,49 @@ impl Panel {
                 return;
             }
         }
-        if on_disk && self.folder_stamp() != self.stamp {
+        self.sync_watch(on_disk);
+        // Changes reported by the system (also a file that grew or was overwritten, which does not
+        // touch the folder's own time) are picked up at most every 300 ms, however busy the folder is.
+        let dirty = self.watch.as_ref().is_some_and(|w| w.dirty.load(std::sync::atomic::Ordering::Relaxed));
+        if on_disk && dirty {
+            if self.last_reload.elapsed() >= std::time::Duration::from_millis(300) {
+                if let Some(w) = &self.watch {
+                    w.dirty.store(false, std::sync::atomic::Ordering::Relaxed);
+                }
+                self.reload();
+            } else {
+                self.ctx.request_repaint_after(std::time::Duration::from_millis(300));
+            }
+        } else if on_disk && self.folder_stamp() != self.stamp {
             self.reload();
         }
     }
 
+    /// Keeps a change watcher on the folder that is shown (none for archives and servers; when the
+    /// watcher cannot be set up, the folder's modified time is polled as before).
+    fn sync_watch(&mut self, on_disk: bool) {
+        use notify::{RecursiveMode, Watcher};
+        if !on_disk {
+            self.watch = None;
+            return;
+        }
+        if self.watch.as_ref().is_some_and(|w| w.dir == self.cwd) {
+            return;
+        }
+        let dirty = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (flag, ctx) = (dirty.clone(), self.ctx.clone());
+        let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            if res.is_ok_and(|e| !e.kind.is_access()) {
+                flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                ctx.request_repaint();
+            }
+        });
+        self.watch = watcher.ok().and_then(|mut w| w.watch(&self.cwd, RecursiveMode::NonRecursive).ok().map(|_| Watch { dir: self.cwd.clone(), dirty, _watcher: w }));
+    }
+
     /// Re-reads the directory and keeps the cursor on the same name when possible.
     pub fn reload(&mut self) {
+        self.last_reload = std::time::Instant::now();
         let keep = self.entries.get(self.cursor).map(|e| e.name.clone());
         if self.ftp.is_some() {
             // A server read can take long: do it on a worker, the old listing stays until it arrives.
@@ -393,7 +441,7 @@ impl Panel {
                 let index = a.index.clone();
                 let inner = join_inner(&a.inner, &e.name);
                 let label = format!("{}\\{}", self.location(), e.name);
-                self.start_loading(label, true, move || gc_archive::open_nested(&index, &inner));
+                self.start_loading(label, true, move || gc_archive::open_nested(&index, &inner).map(Arc::new));
             } else {
                 let index = a.index.clone();
                 let inner = join_inner(&a.inner, &e.name);
@@ -403,14 +451,14 @@ impl Panel {
             self.go_to(e.path, None);
         } else if gc_archive::is_archive(&e.path) {
             let path = e.path;
-            self.start_loading(path.display().to_string(), false, move || gc_archive::open(&path));
+            self.start_loading(path.display().to_string(), false, move || gc_archive::open_cached(&path));
         } else {
             self.action = Some(PanelAction::Open(e.path));
         }
     }
 
     /// Opens an archive on a worker thread so big files never freeze the window.
-    fn start_loading(&mut self, label: String, nested: bool, work: impl FnOnce() -> io::Result<ArchiveIndex> + Send + 'static) {
+    fn start_loading(&mut self, label: String, nested: bool, work: impl FnOnce() -> io::Result<Arc<ArchiveIndex>> + Send + 'static) {
         let (tx, rx) = mpsc::channel();
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
@@ -438,7 +486,7 @@ impl Panel {
                     self.stack.extend(outer);
                 }
                 self.cwd = index.file.clone();
-                self.archive = Some(ArchiveView { index: Arc::new(index), inner: String::new(), label: l.label });
+                self.archive = Some(ArchiveView { index, inner: String::new(), label: l.label });
                 self.enter_listing();
             }
             Err(e) => self.error = Some(format!("{}: {e}", l.label)),
@@ -1170,6 +1218,27 @@ mod tests {
         std::fs::write(dir.join("new.crc"), b"x").unwrap();
         p.refresh_if_changed();
         assert!(p.entries.iter().any(|e| e.name == "new.crc"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_file_that_grows_is_noticed_through_the_change_watcher() {
+        let dir = std::env::temp_dir().join(format!("gc_watch_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("log.txt"), b"x").unwrap();
+        let mut p = new_panel(&dir);
+        p.refresh_if_changed(); // sets the watcher up
+        std::fs::write(dir.join("log.txt"), vec![b'y'; 5000]).unwrap();
+        let size = |p: &Panel| p.entries.iter().find(|e| e.name == "log.txt").map(|e| e.size);
+        for _ in 0..100 {
+            p.refresh_if_changed();
+            if size(&p) == Some(5000) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        assert_eq!(size(&p), Some(5000));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

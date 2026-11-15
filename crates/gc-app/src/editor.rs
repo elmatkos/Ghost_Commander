@@ -55,6 +55,8 @@ struct Doc {
     find_q: String,
     repl: String,
     case: bool,
+    /// The find text is a regular expression (`$1` in the replacement).
+    regex: bool,
     msg: String,
     confirm: bool,
     fresh: bool,
@@ -141,6 +143,79 @@ fn replace_all(text: &str, q: &str, r: &str, case: bool) -> (String, usize) {
     }
     out.push_str(&text[pos..]);
     (out, count)
+}
+
+/// The compiled find text when "Regex" is on (`Ok(None)` for a plain search).
+fn compile(q: &str, case: bool, regex: bool) -> Result<Option<regex::Regex>, String> {
+    if !regex || q.is_empty() {
+        return Ok(None);
+    }
+    regex::RegexBuilder::new(q).case_insensitive(!case).multi_line(true).build().map(Some).map_err(|e| e.to_string().lines().last().unwrap_or("bad pattern").trim().to_owned())
+}
+
+/// First non-empty match at or after byte `from`, wrapping around to the start.
+fn find_re(text: &str, re: &regex::Regex, from: usize) -> Option<(usize, usize)> {
+    let mut first = None;
+    for m in re.find_iter(text).filter(|m| !m.is_empty()) {
+        if m.start() >= from {
+            return Some((m.start(), m.end()));
+        }
+        first.get_or_insert((m.start(), m.end()));
+    }
+    first
+}
+
+/// The line comment of a language (`None`: it has none, or only block comments).
+fn comment_prefix(lang: Option<Lang>) -> Option<&'static str> {
+    match lang {
+        Some(Lang::C | Lang::Cpp | Lang::CSharp | Lang::Rust) => Some("//"),
+        Some(Lang::PowerShell | Lang::Python | Lang::Nsh) => Some("#"),
+        Some(Lang::Ini) => Some(";"),
+        Some(Lang::Batch) => Some("::"),
+        Some(Lang::Vbs) => Some("'"),
+        Some(Lang::Json | Lang::Xml | Lang::Markdown | Lang::Log) => None,
+        None => Some("#"),
+    }
+}
+
+/// Ctrl+/: comments the lines touched by the selection `a..b`, or uncomments them when all of them
+/// are commented. Returns the new text and the new selection (the changed lines).
+fn toggle_comment(text: &str, a: usize, b: usize, prefix: &str) -> (String, usize, usize) {
+    let start = text[..a].rfind('\n').map_or(0, |i| i + 1);
+    // a selection that ends at the very start of a line does not include that line
+    let end_pos = if b > a && text[..b].ends_with('\n') { b - 1 } else { b };
+    let end = text[end_pos..].find('\n').map_or(text.len(), |i| end_pos + i);
+    let lines: Vec<&str> = text[start..end].split('\n').collect();
+    let body = |l: &str| l.trim_start().to_owned();
+    let all_commented = lines.iter().filter(|l| !l.trim().is_empty()).all(|l| body(l).starts_with(prefix)) && lines.iter().any(|l| !l.trim().is_empty());
+    let indent = lines.iter().filter(|l| !l.trim().is_empty()).map(|l| l.len() - l.trim_start().len()).min().unwrap_or(0);
+    let out: Vec<String> = lines
+        .iter()
+        .map(|l| {
+            if l.trim().is_empty() {
+                return (*l).to_owned();
+            }
+            let ws = l.len() - l.trim_start().len();
+            if all_commented {
+                let rest = &l[ws..][prefix.len()..];
+                format!("{}{}", &l[..ws], rest.strip_prefix(' ').unwrap_or(rest))
+            } else {
+                format!("{}{prefix} {}", &l[..indent], &l[indent..])
+            }
+        })
+        .collect();
+    let joined = out.join("\n");
+    let new_end = start + joined.len();
+    (format!("{}{}{}", &text[..start], joined, &text[end..]), start, new_end)
+}
+
+/// Enter: the new line gets the indentation of the current one, one level deeper after `{` or `:`.
+fn auto_indent(text: &str, at: usize) -> String {
+    let line_start = text[..at].rfind('\n').map_or(0, |i| i + 1);
+    let line = &text[line_start..at];
+    let indent: String = line.chars().take_while(|c| *c == ' ' || *c == '\t').collect();
+    let deeper = line.trim_end().ends_with(['{', ':', '(', '[']);
+    format!("\n{indent}{}", if deeper { TAB } else { "" })
 }
 
 /// The whole text as one layout job, coloured per syntax span (plain when the language is unknown).
@@ -306,7 +381,15 @@ impl Doc {
 
     fn find_next(&mut self, ctx: &egui::Context, id: Id, row_h: f32, page: f32) {
         let (_, end) = selection(ctx, id, &self.text);
-        match find_from(&self.text, &self.find_q, self.case, end) {
+        let found = match compile(&self.find_q, self.case, self.regex) {
+            Err(e) => {
+                self.msg = format!("Bad pattern: {e}");
+                return;
+            }
+            Ok(Some(re)) => find_re(&self.text, &re, end),
+            Ok(None) => find_from(&self.text, &self.find_q, self.case, end),
+        };
+        match found {
             Some((a, b)) => {
                 set_selection(ctx, id, &self.text, a, b);
                 self.scroll_to(a, row_h, page);
@@ -319,18 +402,40 @@ impl Doc {
     fn replace_one(&mut self, ctx: &egui::Context, id: Id, row_h: f32, page: f32) {
         let (a, b) = selection(ctx, id, &self.text);
         let selected = self.text.get(a..b).unwrap_or("");
-        let same = if self.case { selected == self.find_q } else { selected.eq_ignore_ascii_case(&self.find_q) };
-        if a < b && same {
+        // what the selection would be replaced with, when it is a match of the find text
+        let new = match compile(&self.find_q, self.case, self.regex) {
+            Err(e) => {
+                self.msg = format!("Bad pattern: {e}");
+                return;
+            }
+            Ok(Some(re)) => re.captures_at(&self.text, a).filter(|c| c.get(0).is_some_and(|m| m.start() == a && m.end() == b)).map(|c| {
+                let mut out = String::new();
+                c.expand(&self.repl, &mut out);
+                out
+            }),
+            Ok(None) => {
+                let same = if self.case { selected == self.find_q } else { selected.eq_ignore_ascii_case(&self.find_q) };
+                (a < b && same).then(|| self.repl.clone())
+            }
+        };
+        if let (true, Some(new)) = (a < b, new) {
             self.last_edit = None;
-            self.text.replace_range(a..b, &self.repl);
-            let end = a + self.repl.len();
+            self.text.replace_range(a..b, &new);
+            let end = a + new.len();
             set_selection(ctx, id, &self.text, end, end);
         }
         self.find_next(ctx, id, row_h, page);
     }
 
     fn replace_everything(&mut self) {
-        let (t, n) = replace_all(&self.text, &self.find_q, &self.repl, self.case);
+        let (t, n) = match compile(&self.find_q, self.case, self.regex) {
+            Err(e) => {
+                self.msg = format!("Bad pattern: {e}");
+                return;
+            }
+            Ok(Some(re)) => (re.replace_all(&self.text, self.repl.as_str()).into_owned(), re.find_iter(&self.text).filter(|m| !m.is_empty()).count()),
+            Ok(None) => replace_all(&self.text, &self.find_q, &self.repl, self.case),
+        };
         self.msg = format!("{n} replaced.");
         self.last_edit = None;
         self.text = t;
@@ -369,6 +474,7 @@ impl Editor {
             find_q: String::new(),
             repl: String::new(),
             case: false,
+            regex: false,
             msg: String::new(),
             confirm: false,
             fresh: true,
@@ -446,6 +552,28 @@ impl Editor {
             d.last_edit = None;
             d.text.replace_range(a..b, TAB);
             set_selection(ctx, id, &d.text, a + TAB.len(), a + TAB.len());
+        }
+
+        // Enter keeps the indentation of the line (one level deeper after { ( [ or :).
+        if ctx.memory(|m| m.has_focus(id)) && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
+            let (a, b) = selection(ctx, id, &d.text);
+            let ins = auto_indent(&d.text, a);
+            d.last_edit = None;
+            d.text.replace_range(a..b, &ins);
+            set_selection(ctx, id, &d.text, a + ins.len(), a + ins.len());
+        }
+        // Ctrl+/: comment / uncomment the selected lines.
+        if ctx.memory(|m| m.has_focus(id)) && ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Slash)) {
+            match comment_prefix(d.lang) {
+                Some(p) => {
+                    let (a, b) = selection(ctx, id, &d.text);
+                    let (t, na, nb) = toggle_comment(&d.text, a, b, p);
+                    d.last_edit = None;
+                    d.text = t;
+                    set_selection(ctx, id, &d.text, na, nb);
+                }
+                None => d.msg = "This language has no line comments.".into(),
+            }
         }
 
         // PageUp / PageDown: TextEdit ignores them; move the cursor and the view by a page.
@@ -600,6 +728,7 @@ impl Editor {
                     ui.label("Replace");
                     ui.add(TextEdit::singleline(&mut d.repl).desired_width(180.0));
                     ui.checkbox(&mut d.case, "Match case");
+                    ui.checkbox(&mut d.regex, "Regex").on_hover_text("The find text is a regular expression; use $1, $2 ... for groups in the replacement.");
                     if ui.button("Next  (F3)").clicked() || enter || (f3 && !ctrl_f3) {
                         d.find_next(ctx, id, row_h, page);
                     }
@@ -704,6 +833,34 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn regex_find_and_groups() {
+        let re = compile(r"(\w+)@(\w+)", false, true).unwrap().unwrap();
+        assert_eq!(find_re("x foo@bar y", &re, 0), Some((2, 9)));
+        assert_eq!(find_re("foo@bar zed@q", &re, 5), Some((8, 13)));
+        assert_eq!(find_re("foo@bar", &re, 6), Some((0, 7)), "wraps around");
+        assert_eq!(re.replace_all("a@b c@d", "$2.$1").into_owned(), "b.a d.c");
+        assert!(compile("(", false, true).is_err());
+        assert!(compile("a.c", false, false).unwrap().is_none());
+        let lines = compile("^x", true, true).unwrap().unwrap();
+        assert_eq!(find_re("ax\nxb", &lines, 0), Some((3, 4)), "^ matches at every line start");
+    }
+
+    #[test]
+    fn comment_toggle_and_auto_indent() {
+        let t = "fn a() {\n    let x = 1;\n\n    let y = 2;\n}\n";
+        let (c, a, b) = toggle_comment(t, 12, 40, "//");
+        assert_eq!(c, "fn a() {\n    // let x = 1;\n\n    // let y = 2;\n}\n");
+        assert_eq!(&c[a..b], "    // let x = 1;\n\n    // let y = 2;");
+        let (u, _, _) = toggle_comment(&c, a, b, "//");
+        assert_eq!(u, t);
+        // a mixed selection gets commented as a whole
+        let (m, _, _) = toggle_comment("a\n# b\n", 0, 5, "#");
+        assert_eq!(m, "# a\n# # b\n");
+        assert_eq!(auto_indent("    if x {", 10), "\n        ");
+        assert_eq!(auto_indent("\tfoo", 4), "\n\t");
+    }
 
     #[test]
     fn find_and_replace() {

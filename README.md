@@ -61,17 +61,15 @@ Branding lives in `assets/` (`icon.ico` is embedded into the exe by `crates/gc-a
 - Compare: highlight changes inside a line, edit / merge from the diff view, directory synchronisation (copy the differences), compare archives.
 - **Multi-rename** (Ctrl+M): mask, counter, regex, preview before it runs. A history of visited folders.
 - More panel columns (attributes), brief / full view, image thumbnails. Folder sizes inside archives and on FTP servers.
-- Job list: pause and speed limit of running copies; a better conflict dialog (e.g. "overwrite only older").
 - Viewer: "Copy selection" button and Shift+click row selection if selecting with the mouse proves unreliable.
-- Editor: regular expressions in find / replace, find in files, auto-indent of a new line, Ctrl+/ to comment, bracket matching.
+- Editor: find in files, bracket matching, block comments for XML / HTML.
 - Still to test by hand: DISM window with UAC without admin rights, Ctrl+L and tab locks, closing tabs, minimizing the viewer / editor together with GC, copying code from the side viewer into the editor.
 - FTP: implicit FTPS (port 990), SFTP, upload back after F4 on a server file, server-to-server copy, transfers in parallel with browsing (a transfer currently holds the connection).
 - Verify v0.19.0 copy: measure parallel file counts (1/2/4/8/16), test copies between C: D: F: G:, check how parallel copying looks in the GUI.
 
 **Performance: caching and acceleration everywhere possible**
-- Cache directory listings (keyed by path + change notification via `ReadDirectoryChangesW`), incremental refresh instead of full re-read.
+- Directory listings: read big folders (tens of thousands of entries, network shares) on a worker thread and keep a cache of listings; measured on this PC: 5 000 entries 14 ms, 36 000 entries 160 ms (warm) / 700 ms (cold). Incremental refresh instead of a full re-read.
 - Cache icons, thumbnails and decoded images (LRU, optional on-disk thumbnail cache).
-- Cache archive indexes (central directories) so reopening an archive is instant.
 - Use modern CPU features wherever it pays off, with runtime detection and scalar fallback: AVX2/AVX-512 for search and compare, SHA-NI and PCLMULQDQ/CRC32 instructions for hashing, AES-NI, SIMD image resize/decode, BMI2. Applies to core and to every later feature (archives, hashing, compare, search).
 - Parallelism: rayon for hashing, search, directory sizing; large-file copy with unbuffered/overlapped I/O; NTFS MFT/USN fast search.
 - Measure first: benchmark suite (`criterion`) before and after each optimization.
@@ -86,6 +84,13 @@ Branding lives in `assets/` (`icon.ico` is embedded into the exe by `crates/gc-a
 - **Ctrl+B** (Tools > Bookmarks) lists bookmarked folders: Enter / double click shows one in the active panel, Ins adds the current folder, Del removes, the arrows reorder. Saved in `settings.toml`.
 - **Folder sizes**: Space on a folder marks it and works out its size (counted in parallel, shown instead of `<DIR>`); **Alt+Shift+Enter** does it for the marked folders or, with nothing marked, for all folders of the panel. Sorting by size then uses them.
 - **Extension column**: Config > Options > "Show the extension in its own column" splits the name and the extension; click the Ext heading (or Ctrl+F4) to sort by it.
+
+## Copy jobs, editor and caching (v0.37.0)
+
+- Running copy / move jobs have **Pause / Resume** and a **speed limit** (No limit, 1 ... 250 MB/s) next to Cancel; the limit applies to the whole job and can be changed while it runs.
+- The "File exists" dialog shows the size and time of the existing file and has **Overwrite if newer (N)**: the file is replaced only when the source is newer, otherwise it is skipped (with "Apply to all" this is decided per file). For files inside archives and on FTP servers the age cannot be compared, so it overwrites.
+- Editor: **Regex** checkbox in Find / Replace (Rust regex syntax, `$1` groups in the replacement, `^` / `$` match at every line), **Ctrl+/** comments or uncomments the selected lines (`//`, `#`, `;`, `::`, `'` by language), **Enter** keeps the indentation (one level deeper after `{ ( [` or `:`).
+- Panels follow the folder through the Windows change notification instead of polling its time, so a file that grows or is overwritten is noticed too (at most every 300 ms). Archives opened lately (8 of them) are kept in memory: opening one again is instant unless it changed on disk.
 
 ## Themes and file icons
 

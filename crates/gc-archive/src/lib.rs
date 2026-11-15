@@ -86,6 +86,37 @@ fn normalize(name: &str) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join("/"))
 }
 
+/// An opened archive: where it is, how big and when it was changed, and its index.
+type CachedIndex = (PathBuf, u64, Option<SystemTime>, std::sync::Arc<ArchiveIndex>);
+
+/// The last few archives that were opened, so opening one again is instant. An archive that changed
+/// on disk (size or time) is read again.
+static INDEX_CACHE: std::sync::Mutex<Vec<CachedIndex>> = std::sync::Mutex::new(Vec::new());
+const INDEX_CACHE_SIZE: usize = 8;
+
+/// Like [`open`], but a recently opened and unchanged archive comes from memory.
+pub fn open_cached(file: &Path) -> io::Result<std::sync::Arc<ArchiveIndex>> {
+    let meta = fs::metadata(file)?;
+    let (len, time) = (meta.len(), meta.modified().ok());
+    {
+        let mut cache = INDEX_CACHE.lock().unwrap();
+        if let Some(i) = cache.iter().position(|c| c.0 == file && c.1 == len && c.2 == time) {
+            let hit = cache.remove(i);
+            let index = hit.3.clone();
+            cache.push(hit);
+            return Ok(index);
+        }
+    }
+    let index = std::sync::Arc::new(open(file)?);
+    let mut cache = INDEX_CACHE.lock().unwrap();
+    cache.retain(|c| c.0 != file);
+    if cache.len() >= INDEX_CACHE_SIZE {
+        cache.remove(0);
+    }
+    cache.push((file.to_path_buf(), len, time, index.clone()));
+    Ok(index)
+}
+
 pub fn open(file: &Path) -> io::Result<ArchiveIndex> {
     let kind = kind_of(file).ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, "unsupported archive type"))?;
     let entries = match kind {
@@ -744,6 +775,23 @@ mod tests {
             }
         }
         None
+    }
+
+    #[test]
+    fn reopening_an_unchanged_archive_comes_from_the_cache() {
+        let dir = scratch("cache");
+        let file = dir.join("c.zip");
+        make_zip(&file);
+        let a = open_cached(&file).unwrap();
+        let b = open_cached(&file).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&a, &b));
+        make_zip(&file); // rewritten: a new modified time
+        std::thread::sleep(Duration::from_millis(20));
+        let f = fs::OpenOptions::new().write(true).open(&file).unwrap();
+        f.set_modified(SystemTime::now() + Duration::from_secs(5)).unwrap();
+        let c = open_cached(&file).unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&a, &c));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

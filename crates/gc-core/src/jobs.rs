@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(windows)]
 use crate::winfs;
@@ -49,6 +49,25 @@ pub enum Resolution {
     Skip,
     Rename,
     Cancel,
+    /// Overwrite only when the source is newer than the target, otherwise skip the file.
+    Older,
+}
+
+/// `Older` decided for one file: overwrite when the source is newer (or when that cannot be told).
+fn settle(res: Resolution, target: &Path, src: Option<&Path>) -> Resolution {
+    if res != Resolution::Older {
+        return res;
+    }
+    let newer = (|| {
+        let s = fs::metadata(src?).ok()?.modified().ok()?;
+        let t = fs::metadata(target).ok()?.modified().ok()?;
+        Some(s > t)
+    })();
+    if newer.unwrap_or(true) {
+        Resolution::Overwrite
+    } else {
+        Resolution::Skip
+    }
 }
 
 /// Shared state between the worker thread and the UI.
@@ -58,6 +77,12 @@ pub struct Progress {
     pub done: AtomicU64,
     pub finished: AtomicBool,
     pub cancel: AtomicBool,
+    /// The job waits (copying stops at the next block) until this is cleared again.
+    pub paused: AtomicBool,
+    /// Speed limit in bytes per second for the whole job; 0 = unlimited.
+    pub limit: AtomicU64,
+    /// Start of the current speed window, bytes counted in it and the limit it was started with.
+    pace_window: Mutex<Option<(Instant, u64, u64)>>,
     errors: Mutex<Vec<String>>,
     /// Sticky answer after "apply to all".
     sticky: Mutex<Option<Resolution>>,
@@ -93,11 +118,46 @@ impl Progress {
         self.cancel.load(Ordering::Relaxed)
     }
 
+    /// Called by the copy loops after every block: waits while the job is paused and slows the
+    /// copy down to the speed limit (if one is set).
+    pub fn pace(&self, bytes: u64) {
+        while self.paused.load(Ordering::Relaxed) && !self.cancelled() {
+            thread::sleep(Duration::from_millis(50));
+        }
+        let limit = self.limit.load(Ordering::Relaxed);
+        if limit == 0 {
+            return;
+        }
+        let wait = {
+            let mut w = self.pace_window.lock().unwrap();
+            let (start, sent, was) = w.get_or_insert((Instant::now(), 0, limit));
+            if *was != limit {
+                *start = Instant::now();
+                *sent = 0;
+                *was = limit;
+            }
+            *sent += bytes;
+            Duration::from_secs_f64(*sent as f64 / limit as f64).saturating_sub(start.elapsed())
+        };
+        // short sleeps, so Cancel and a changed limit take effect quickly
+        let mut left = wait.min(Duration::from_millis(500));
+        while !left.is_zero() && !self.cancelled() {
+            let step = left.min(Duration::from_millis(50));
+            thread::sleep(step);
+            left -= step;
+        }
+    }
+
     /// Called by the worker: blocks until the UI answers (or the job is cancelled).
     pub fn ask_conflict(&self, target: &Path) -> Resolution {
+        self.ask_conflict_src(target, None)
+    }
+
+    /// Like [`Progress::ask_conflict`], with the source file so that "overwrite if newer" can compare.
+    pub fn ask_conflict_src(&self, target: &Path, src: Option<&Path>) -> Resolution {
         let _turn = self.ask_turn.lock().unwrap();
         if let Some(r) = *self.sticky.lock().unwrap() {
-            return r;
+            return settle(r, target, src);
         }
         if self.cancelled() {
             return Resolution::Cancel;
@@ -120,7 +180,7 @@ impl Progress {
         } else if all {
             *self.sticky.lock().unwrap() = Some(resolution);
         }
-        resolution
+        settle(resolution, target, src)
     }
 }
 
@@ -313,13 +373,13 @@ fn copy_file(src: &Path, dst: &Path, size: u64, p: &Progress) -> io::Result<()> 
                 if target.is_dir() {
                     return Err(io::Error::new(io::ErrorKind::AlreadyExists, "a folder has that name"));
                 }
-                match p.ask_conflict(&target) {
+                match p.ask_conflict_src(&target, Some(src)) {
                     Resolution::Skip => {
                         p.done.fetch_add(size, Ordering::Relaxed);
                         return Ok(());
                     }
                     Resolution::Cancel => return Ok(()),
-                    Resolution::Overwrite => overwrite = true,
+                    Resolution::Overwrite | Resolution::Older => overwrite = true,
                     Resolution::Rename => {
                         target = unique_name(&target);
                         overwrite = false;
@@ -360,7 +420,7 @@ pub fn copy_stream(input: &mut dyn Read, size: u64, dst: &Path, p: &Progress) ->
                     return Ok(None);
                 }
                 Resolution::Cancel => return Ok(None),
-                Resolution::Overwrite => OpenOptions::new().write(true).create(true).truncate(true).open(&target)?,
+                Resolution::Overwrite | Resolution::Older => OpenOptions::new().write(true).create(true).truncate(true).open(&target)?,
                 Resolution::Rename => {
                     target = unique_name(&target);
                     options.open(&target)?
@@ -382,6 +442,7 @@ pub fn copy_stream(input: &mut dyn Read, size: u64, dst: &Path, p: &Progress) ->
         }
         output.write_all(&buf[..n])?;
         p.done.fetch_add(n as u64, Ordering::Relaxed);
+        p.pace(n as u64);
     }
     output.flush()?;
     Ok(Some(target))
@@ -396,7 +457,7 @@ pub fn claim_target(dst: &Path, p: &Progress) -> Option<PathBuf> {
     }
     match p.ask_conflict(dst) {
         Resolution::Skip | Resolution::Cancel => None,
-        Resolution::Overwrite => fs::remove_file(dst).ok().map(|_| dst.to_path_buf()),
+        Resolution::Overwrite | Resolution::Older => fs::remove_file(dst).ok().map(|_| dst.to_path_buf()),
         Resolution::Rename => Some(unique_name(dst)),
     }
 }
@@ -427,13 +488,13 @@ fn move_tree(src: &Path, dst: &Path, p: &Progress) -> io::Result<()> {
                 }
                 return if p.cancelled() { Ok(()) } else { fs::remove_dir(src) };
             }
-            (false, false) => match p.ask_conflict(&dst) {
+            (false, false) => match p.ask_conflict_src(&dst, Some(src)) {
                 Resolution::Skip => {
                     p.done.fetch_add(existing.len(), Ordering::Relaxed);
                     return Ok(());
                 }
                 Resolution::Cancel => return Ok(()),
-                Resolution::Overwrite => fs::remove_file(&dst)?,
+                Resolution::Overwrite | Resolution::Older => fs::remove_file(&dst)?,
                 Resolution::Rename => dst = unique_name(&dst),
             },
             _ => return Err(io::Error::new(io::ErrorKind::AlreadyExists, "a file and a folder share the name")),
@@ -627,6 +688,63 @@ mod tests {
         assert!(src.join("a.txt").exists());
         assert_eq!(p.done.load(Ordering::Relaxed), p.total.load(Ordering::Relaxed));
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn overwrite_if_newer_replaces_old_targets_and_keeps_newer_ones() {
+        let root = scratch("older");
+        let (src, dest) = (root.join("src"), root.join("dest"));
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(dest.join("src")).unwrap();
+        let now = std::time::SystemTime::now();
+        let set = |p: &Path, text: &str, age_secs: u64| {
+            fs::write(p, text).unwrap();
+            fs::OpenOptions::new().write(true).open(p).unwrap().set_modified(now - Duration::from_secs(age_secs)).unwrap();
+        };
+        set(&src.join("new.txt"), "source new", 10);
+        set(&dest.join("src").join("new.txt"), "target old", 1000);
+        set(&src.join("old.txt"), "source old", 1000);
+        set(&dest.join("src").join("old.txt"), "target new", 10);
+        let (p, prompts) = run_answering(Op::Copy { srcs: vec![src.clone()], dest_dir: dest.clone() }, Resolution::Older, true);
+        assert_eq!(p.errors().len(), 0);
+        assert_eq!(prompts, 1, "apply to all asks once");
+        assert_eq!(fs::read_to_string(dest.join("src/new.txt")).unwrap(), "source new");
+        assert_eq!(fs::read_to_string(dest.join("src/old.txt")).unwrap(), "target new");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_real_copy_honours_the_speed_limit() {
+        let root = scratch("limit");
+        let src = root.join("big.bin");
+        fs::write(&src, vec![7u8; 3 * 1024 * 1024]).unwrap();
+        let p = Progress::default();
+        p.limit.store(2 * 1024 * 1024, Ordering::Relaxed);
+        let t = Instant::now();
+        run(&Op::CopyTo { src: src.clone(), target: root.join("copy.bin") }, &p);
+        assert!(p.errors().is_empty());
+        assert_eq!(fs::metadata(root.join("copy.bin")).unwrap().len(), 3 * 1024 * 1024);
+        assert!(t.elapsed() >= Duration::from_millis(900), "3 MB at 2 MB/s must take about 1.5 s, took {:?}", t.elapsed());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_paused_job_waits_and_a_limit_slows_it_down() {
+        let p = Arc::new(Progress::default());
+        p.paused.store(true, Ordering::Relaxed);
+        let q = p.clone();
+        let t = Instant::now();
+        let h = thread::spawn(move || q.pace(10));
+        thread::sleep(Duration::from_millis(200));
+        assert!(!h.is_finished(), "paused: pace must block");
+        p.paused.store(false, Ordering::Relaxed);
+        h.join().unwrap();
+        assert!(t.elapsed() >= Duration::from_millis(200));
+        // 100 KB at 1 MB/s takes about 0.1 s
+        p.limit.store(1 << 20, Ordering::Relaxed);
+        let t = Instant::now();
+        p.pace(100 * 1024);
+        assert!(t.elapsed() >= Duration::from_millis(80), "limit ignored: {:?}", t.elapsed());
     }
 
     #[test]

@@ -579,7 +579,7 @@ fn put_file(conn: &SharedConn, local: &Path, remote: &str, size: u64, known: &mu
     }
     if known[&dir].contains(base_name(&remote)) {
         match p.ask_conflict(Path::new(&remote)) {
-            Resolution::Overwrite => {}
+            Resolution::Overwrite | Resolution::Older => {}
             Resolution::Skip | Resolution::Cancel => {
                 p.done.fetch_add(size, Ordering::Relaxed);
                 return Ok(false);

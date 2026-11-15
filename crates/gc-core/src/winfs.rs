@@ -46,7 +46,10 @@ unsafe extern "system" fn on_progress(_total: i64, transferred: i64, _stream_siz
     // Only the main data stream counts towards the byte total (alternate streams are small).
     if stream == 1 {
         let now = transferred.max(0) as u64;
-        ctx.p.done.fetch_add(now.saturating_sub(ctx.last.replace(now)), Ordering::Relaxed);
+        let delta = now.saturating_sub(ctx.last.replace(now));
+        ctx.p.done.fetch_add(delta, Ordering::Relaxed);
+        // pause / speed limit: this callback runs after every block the system copies
+        ctx.p.pace(delta);
     }
     if ctx.p.cancelled() {
         PROGRESS_CANCEL

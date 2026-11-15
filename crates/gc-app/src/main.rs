@@ -1390,10 +1390,17 @@ impl App {
         let mut answer: Option<Resolution> = None;
         egui::Window::new("File exists").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
             ui.label(format!("{}\nalready exists.", target.display()));
+            if let Ok(meta) = std::fs::metadata(&target) {
+                let when = meta.modified().ok().map(|t| chrono::DateTime::<chrono::Local>::from(t).format("%Y-%m-%d %H:%M:%S").to_string()).unwrap_or_default();
+                ui.weak(format!("Existing file: {}, {when}", crate::panel::fmt_size(meta.len())));
+            }
             ui.checkbox(&mut self.apply_all, "Apply to all remaining conflicts");
             ui.horizontal(|ui| {
                 if ui.button("Overwrite (O)").clicked() {
                     answer = Some(Resolution::Overwrite);
+                }
+                if ui.button("Overwrite if newer (N)").on_hover_text("Overwrites the file only when the one being copied is newer, otherwise skips it.").clicked() {
+                    answer = Some(Resolution::Older);
                 }
                 if ui.button("Skip (S)").clicked() {
                     answer = Some(Resolution::Skip);
@@ -1406,7 +1413,7 @@ impl App {
                 }
             });
         });
-        for (key, res) in [(Key::O, Resolution::Overwrite), (Key::S, Resolution::Skip), (Key::R, Resolution::Rename), (Key::Escape, Resolution::Cancel)] {
+        for (key, res) in [(Key::O, Resolution::Overwrite), (Key::N, Resolution::Older), (Key::S, Resolution::Skip), (Key::R, Resolution::Rename), (Key::Escape, Resolution::Cancel)] {
             if ctx.input(|i| i.key_pressed(key)) {
                 answer = Some(res);
             }
@@ -1449,8 +1456,26 @@ impl App {
                     let total = p.total.load(Ordering::Relaxed).max(1);
                     let frac = (p.done.load(Ordering::Relaxed) as f32 / total as f32).clamp(0.0, 1.0);
                     ui.add(egui::ProgressBar::new(frac).desired_width(200.0).show_percentage());
+                    let paused = p.paused.load(Ordering::Relaxed);
+                    if ui.small_button(if paused { "Resume" } else { "Pause" }).clicked() {
+                        p.paused.store(!paused, Ordering::Relaxed);
+                    }
+                    let limit = p.limit.load(Ordering::Relaxed);
+                    let text = if limit == 0 { "No limit".to_owned() } else { format!("{} MB/s", limit >> 20) };
+                    egui::ComboBox::from_id_salt(("job_limit", i)).selected_text(text).width(80.0).show_ui(ui, |ui| {
+                        for mb in [0u64, 1, 5, 10, 25, 50, 100, 250] {
+                            let label = if mb == 0 { "No limit".to_owned() } else { format!("{mb} MB/s") };
+                            if ui.selectable_label(limit == mb << 20, label).clicked() {
+                                p.limit.store(mb << 20, Ordering::Relaxed);
+                            }
+                        }
+                    });
+                    if paused {
+                        ui.weak("paused");
+                    }
                     if ui.small_button("Cancel").clicked() {
                         p.cancel.store(true, Ordering::Relaxed);
+                        p.paused.store(false, Ordering::Relaxed);
                     }
                 }
             });

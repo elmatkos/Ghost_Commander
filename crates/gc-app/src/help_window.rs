@@ -14,7 +14,7 @@ const GROUPS: [(&str, &[(&str, &str)]); 10] = [
             ("Viewer keys", "Up/Down, PgUp/PgDn or Space, Home/End, Left/Right scroll; F7 or Ctrl+F find (F3 next, Shift+F3 previous); Ctrl+G go to line (offset in hex); H hex / text; Wrap and Auto-reload checkboxes; Esc closes"),
             ("Alt+F7", "Search for files by name and text, also inside archives"),
             ("Alt+Shift+Enter", "Work out the size of the marked folders (all folders if none is marked); Space on a folder does it too"),
-            ("F4", "Edit (editor in its own window over GC with syntax colors, line numbers, Ctrl+S save, Ctrl+F find / replace, Ctrl+G go to line, Ctrl+F3 viewer beside the editor, Ctrl+Z / Ctrl+Y undo / redo, encoding and line-end choice; big or binary files open in Notepad)"),
+            ("F4", "Edit (editor in its own window over GC with syntax colors, line numbers, Ctrl+S save, Ctrl+F find / replace, Ctrl+G go to line, Ctrl+/ comment, regex find / replace, auto-indent, Ctrl+F3 viewer beside the editor, Ctrl+Z / Ctrl+Y undo / redo, encoding and line-end choice; big or binary files open in Notepad)"),
             ("F5", "Copy to the other panel (from an archive: extract); the dialog lets you edit the target path and, for one item, the new name"),
             ("F6", "Move to the other panel; same editable dialog (move to the same folder with a new name = rename)"),
             ("F7", "Make folder"),

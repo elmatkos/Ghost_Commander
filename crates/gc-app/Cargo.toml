@@ -27,6 +27,8 @@ evtx = { version = "0.15.1", default-features = false }
 zip = { version = "9.1.3", default-features = false, features = ["deflate"] }
 cfb = "0.16.0"
 rayon = "1"
+regex = "1"
+notify = { version = "6", default-features = false }
 similar = "2"
 
 [target.'cfg(windows)'.dependencies]
