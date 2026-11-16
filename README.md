@@ -65,7 +65,7 @@ Branding lives in `assets/` (`icon.ico` is embedded into the exe by `crates/gc-a
 - Editor: find in files, bracket matching, block comments for XML / HTML.
 - Still to test by hand: DISM window with UAC without admin rights, Ctrl+L and tab locks, closing tabs, minimizing the viewer / editor together with GC, copying code from the side viewer into the editor.
 - FTP: implicit FTPS (port 990), SFTP, upload back after F4 on a server file, server-to-server copy, transfers in parallel with browsing (a transfer currently holds the connection).
-- Verify v0.19.0 copy: measure parallel file counts (1/2/4/8/16), test copies between C: D: F: G:, check how parallel copying looks in the GUI.
+- Copy: raise the parallel file cap from 4 to 8 (see the 2026-11-15 measurements in the copy section), re-test the one-file-at-a-time rule for spinning disks on cold data (after a reboot), check how parallel copying looks in the GUI.
 
 **Performance: caching and acceleration everywhere possible**
 - Directory listings: read big folders (tens of thousands of entries, network shares) on a worker thread and keep a cache of listings; measured on this PC: 5 000 entries 14 ms, 36 000 entries 160 ms (warm) / 700 ms (cold). Incremental refresh instead of a full re-read.
@@ -161,6 +161,8 @@ The bottom line shows only the shortcuts for the modifier keys you hold: plain k
 F1 opens a Help window listing every function key and shortcut, grouped by modifier (function keys, Shift, Alt, Ctrl, FTP, moving around, mouse). Alt+F1 / Alt+F2 (and Ctrl+1 / Ctrl+2) pick a drive for the left / right panel. About now lives only in the Help menu. F9 opens System Info (scroll it with Up / Down / PgUp / PgDn / Home / End); the theme editor is in Config > Themes.
 
 Copy and move (across drives) hand each file to Windows (`CopyFileExW`): the copy runs in the kernel, a network share can copy server to server, ReFS clones instead of copying, and timestamps, attributes and alternate streams are kept. Files of 256 MiB and more bypass the system cache so the RAM is not flushed. Up to four files are copied at once; if the source or target is a spinning disk (detected by the seek-penalty flag) one at a time, so the disk head does not thrash. On a test machine (SSD to SSD) 8000 small files went from 30 s to 4.4 s and a 3 GB file from 1.07 s to 0.9 s. `cargo run --release -p gc-core --example bench_copy -- <source> <destination folder>` times a copy; set `GC_COPY_THREADS=1` to force one file at a time. Moves on one drive are still instant renames.
+
+Measured 2026-11-15 on a workstation with C: (4 TB NVMe PCIe 4 x4), D: (RAID 0 of four NVMe PCIe 4 x4), E: (the same with smaller drives) and F:, G: (SATA HDDs), with `bench_copy`. One 4 GiB file: between C:, D: and E: 2.3 to 6.7 GB/s (D: best, writing to C: slowest at 2.4 to 3.0 GB/s); every pair that touches F: or G: runs at the disk's own 222 to 251 MB/s. 3000 small files (44 MiB, data still in the system cache), forcing 1, 2, 4, 8, 16 files at once (`GC_COPY_THREADS`) from C: to D:: 3.98 s, 2.41 s, 1.61 s, 1.20 s, 1.05 s. On the HDD pairs 4 files at once were 2.6 times faster than one (F: to C: 1.71 s against 4.47 s), but from cache, so the head movement a spinning disk dislikes was not exercised; that is why the one-at-a-time rule stays until it is tested on cold data.
 
 ## Copy, Move, Rename and the command line
 
