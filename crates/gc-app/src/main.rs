@@ -38,7 +38,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use eframe::egui::{self, Key};
-use gc_core::jobs::{self, Job, Op, Resolution};
+use gc_core::jobs::{self, Job, Op, Progress, Resolution};
 use about::About;
 use dism_window::DismWindow;
 use ftp_window::{FtpLogWindow, FtpWindow};
@@ -87,6 +87,75 @@ struct RunningJob {
     job: Job,
     /// Panels were refreshed after this job finished.
     refreshed: bool,
+    /// The progress window is open (Hide closes it, "Show progress" in the bottom bar reopens it).
+    show_dialog: bool,
+    /// Last speed sample (time, bytes done) and the smoothed speed in bytes per second.
+    sample: (std::time::Instant, u64),
+    speed: f64,
+    /// Smoothed speed over the last samples (for the graph).
+    history: Vec<f32>,
+}
+
+impl RunningJob {
+    fn new(job: Job, show_dialog: bool) -> Self {
+        Self { job, refreshed: false, show_dialog, sample: (std::time::Instant::now(), 0), speed: 0.0, history: Vec::new() }
+    }
+
+    /// Smooths the transfer speed over about a few seconds.
+    fn update_speed(&mut self) {
+        let dt = self.sample.0.elapsed().as_secs_f64();
+        if dt < 0.5 {
+            return;
+        }
+        let p = &self.job.progress;
+        // Delete is counted in files per second, the rest in bytes per second.
+        let done = if p.by_files.load(Ordering::Relaxed) { p.files_done.load(Ordering::Relaxed) } else { p.done.load(Ordering::Relaxed) };
+        let now = done.saturating_sub(self.sample.1) as f64 / dt;
+        self.speed = if self.speed == 0.0 { now } else { 0.7 * self.speed + 0.3 * now };
+        self.sample = (std::time::Instant::now(), done);
+        self.history.push(self.speed as f32);
+        if self.history.len() > 120 {
+            self.history.remove(0);
+        }
+    }
+}
+
+/// `75` -> `1:15`, `3700` -> `1:01:40`.
+fn fmt_duration(secs: u64) -> String {
+    match (secs / 3600, secs / 60 % 60, secs % 60) {
+        (0, m, s) => format!("{m}:{s:02}"),
+        (h, m, s) => format!("{h}:{m:02}:{s:02}"),
+    }
+}
+
+/// Finished part of a job, 0..=1 (files for a delete, bytes otherwise).
+fn job_fraction(p: &Progress) -> f32 {
+    let (done, total) = if p.by_files.load(Ordering::Relaxed) {
+        (p.files_done.load(Ordering::Relaxed), p.files_total.load(Ordering::Relaxed))
+    } else {
+        (p.done.load(Ordering::Relaxed), p.total.load(Ordering::Relaxed))
+    };
+    if total == 0 { 0.0 } else { (done as f32 / total as f32).clamp(0.0, 1.0) }
+}
+
+/// Line graph of the recent speed (`values`), scaled to the fastest sample.
+fn speed_graph(ui: &mut egui::Ui, values: &[f32]) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 70.0), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 3.0, ui.visuals().extreme_bg_color);
+    painter.rect_stroke(rect, 3.0, ui.visuals().widgets.noninteractive.bg_stroke, egui::StrokeKind::Inside);
+    if values.len() < 2 {
+        return;
+    }
+    let max = values.iter().cloned().fold(1.0_f32, f32::max);
+    let inner = rect.shrink2(egui::vec2(4.0, 6.0));
+    let step = inner.width() / (values.len() - 1) as f32;
+    let points: Vec<egui::Pos2> = values
+        .iter()
+        .enumerate()
+        .map(|(i, v)| egui::pos2(inner.left() + i as f32 * step, inner.bottom() - inner.height() * (v / max)))
+        .collect();
+    painter.add(egui::Shape::line(points, egui::Stroke::new(1.5_f32, ui.visuals().hyperlink_color)));
 }
 
 struct App {
@@ -472,7 +541,7 @@ impl App {
     }
 
     fn start_job(&mut self, op: Op) {
-        self.jobs.push(RunningJob { job: jobs::spawn(op), refreshed: false });
+        self.jobs.push(RunningJob::new(jobs::spawn(op), true));
     }
 
     fn open_dialog_for(&mut self, key: Key, shift: bool) {
@@ -566,7 +635,7 @@ impl App {
                         p.fail(format!("{from}: {e}"));
                     }
                 });
-                self.jobs.push(RunningJob { job, refreshed: false });
+                self.jobs.push(RunningJob::new(job, false));
             }
             None => {
                 let to = path.with_file_name(&new);
@@ -1314,7 +1383,7 @@ impl App {
             self.start_job(op);
         }
         if let Some(job) = spawned {
-            self.jobs.push(RunningJob { job, refreshed: false });
+            self.jobs.push(RunningJob::new(job, false));
         }
         if let Some(name) = newfile {
             let made = match self.panels[self.active].disk_folder() {
@@ -1341,14 +1410,14 @@ impl App {
                 self.status = None;
                 self.panels[self.active].select_after_reload(&name);
                 let remote = gc_ftp::join(&folder, &name);
-                self.jobs.push(RunningJob {
-                    job: jobs::spawn_with("Create folder on server".into(), move |p| {
+                self.jobs.push(RunningJob::new(
+                    jobs::spawn_with("Create folder on server".into(), move |p| {
                         if let Err(e) = gc_ftp::mkdir(&conn, &remote) {
                             p.fail(format!("{remote}: {e}"));
                         }
                     }),
-                    refreshed: false,
-                });
+                    false,
+                ));
             } else {
                 self.status = Some("Enter a plain folder name (one level at a time on a server).".into());
             }
@@ -1442,6 +1511,7 @@ impl App {
 
     fn show_jobs(&mut self, ui: &mut egui::Ui) {
         let mut dismiss: Option<usize> = None;
+        let mut reshow: Option<usize> = None;
         let error = self.themes.active.error.0;
         for (i, j) in self.jobs.iter().enumerate() {
             let p = &j.job.progress;
@@ -1453,9 +1523,15 @@ impl App {
                     }
                     ui.colored_label(error, format!("{} error(s)", p.errors().len()));
                 } else {
-                    let total = p.total.load(Ordering::Relaxed).max(1);
-                    let frac = (p.done.load(Ordering::Relaxed) as f32 / total as f32).clamp(0.0, 1.0);
-                    ui.add(egui::ProgressBar::new(frac).desired_width(200.0).show_percentage());
+                    if p.scanning.load(Ordering::Acquire) {
+                        // The total is not known yet: no percentage, it would only jump around.
+                        ui.add(egui::ProgressBar::new(0.0).desired_width(200.0).text("Calculating...").animate(true));
+                    } else {
+                        ui.add(egui::ProgressBar::new(job_fraction(p)).desired_width(200.0).show_percentage());
+                    }
+                    if !j.show_dialog && ui.small_button("Show progress").clicked() {
+                        reshow = Some(i);
+                    }
                     let paused = p.paused.load(Ordering::Relaxed);
                     if ui.small_button(if paused { "Resume" } else { "Pause" }).clicked() {
                         p.paused.store(!paused, Ordering::Relaxed);
@@ -1485,8 +1561,98 @@ impl App {
                 }
             }
         }
+        if let Some(i) = reshow {
+            self.jobs[i].show_dialog = true;
+        }
         if let Some(i) = dismiss {
             self.jobs.remove(i);
+        }
+    }
+
+    /// The progress window of every running copy/move that has not been hidden.
+    fn show_progress_windows(&mut self, ctx: &egui::Context) {
+        use panel::fmt_size;
+        for (i, j) in self.jobs.iter_mut().enumerate() {
+            let p = j.job.progress.clone();
+            if !j.show_dialog || p.finished.load(Ordering::Acquire) {
+                continue;
+            }
+            j.update_speed();
+            let done = p.done.load(Ordering::Relaxed);
+            let total = p.total.load(Ordering::Relaxed);
+            let scanning = p.scanning.load(Ordering::Acquire);
+            let frac = job_fraction(&p);
+            let by_files = p.by_files.load(Ordering::Relaxed);
+            let (past, now_doing, rate) = if by_files {
+                ("deleted", "Now deleting:", "files/s")
+            } else if j.job.label.starts_with("Move") {
+                ("moved", "Now moving:", "B/s")
+            } else {
+                ("copied", "Now copying:", "B/s")
+            };
+            let fmt_rate = |v: f64| if by_files { format!("{v:.0} {rate}") } else { format!("{}/s", fmt_size(v as u64)) };
+            let (files_done, files_total) = (p.files_done.load(Ordering::Relaxed), p.files_total.load(Ordering::Relaxed));
+            let mut hide = false;
+            egui::Window::new(&j.job.label)
+                .id(egui::Id::new(("progress", i)))
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .default_width(460.0)
+                .show(ctx, |ui| {
+                    if scanning {
+                        ui.add(egui::ProgressBar::new(0.0).desired_width(ui.available_width()).text("Calculating...").animate(true));
+                    } else {
+                        ui.add(egui::ProgressBar::new(frac).desired_width(ui.available_width()).show_percentage());
+                    }
+                    if !j.history.is_empty() {
+                        speed_graph(ui, &j.history);
+                    }
+                    let mut line = if scanning {
+                        format!("{} {past}", fmt_size(done))
+                    } else {
+                        format!("{} of {}", fmt_size(done), fmt_size(total))
+                    };
+                    if j.speed > 0.0 {
+                        line += &format!("   {}", fmt_rate(j.speed));
+                        if !scanning {
+                            let (d, t) = if by_files { (files_done, files_total) } else { (done, total) };
+                            line += &format!("   {} left", fmt_duration((t.saturating_sub(d) as f64 / j.speed) as u64));
+                        }
+                    }
+                    ui.label(line);
+                    if scanning {
+                        ui.label(format!("Files {past}: {files_done}"));
+                    } else if files_total > 0 {
+                        ui.label(format!("Files: {files_done} of {files_total}"));
+                    }
+                    let active = p.active_files();
+                    if !active.is_empty() {
+                        ui.separator();
+                        ui.label(now_doing);
+                        for (path, size, file_done) in active.iter().take(8) {
+                            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                            let text = if by_files || *size == 0 {
+                                name
+                            } else {
+                                format!("{:>3}%  {name}", (file_done * 100 / size).min(100))
+                            };
+                            ui.add(egui::Label::new(egui::RichText::new(text).monospace()).truncate()).on_hover_text(path.display().to_string());
+                        }
+                    }
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui.button("Hide").clicked() {
+                            hide = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            p.cancel.store(true, Ordering::Relaxed);
+                        }
+                    });
+                });
+            if hide {
+                j.show_dialog = false;
+            }
         }
     }
 }
@@ -1652,6 +1818,11 @@ impl App {
                         if let Some(c) = drive_bar::show(col, &drives, &self.panels[i].cwd, &self.themes.active, self.options.drive_free_bar) {
                             bar_click = Some((i, c));
                         }
+                        if self.options.drive_free_text {
+                            if let Some(d) = drives.iter().find(|d| self.panels[i].cwd.starts_with(&d.root)).filter(|d| d.total > 0) {
+                                col.weak(format!("{} of {} free", panel::fmt_size(d.free), panel::fmt_size(d.total)));
+                            }
+                        }
                         col.add_space(2.0);
                     }
                     if let Some(c) = tabs::show(col, &self.side_titles(i), self.cur_tab[i], self.active == i) {
@@ -1701,6 +1872,7 @@ impl App {
 
         step("panel actions handled");
         self.show_dialog(ctx);
+        self.show_progress_windows(ctx);
         self.show_conflict(ctx);
         self.about.show(ctx);
         self.help.show(ctx, &self.themes.active);
@@ -1876,8 +2048,11 @@ fn show_hints(ui: &mut egui::Ui) {
 }
 
 fn main() -> eframe::Result<()> {
-    log::init();
-    log::start_watchdog();
+    // Logging: --log (or /log) switches it on, --no-log forces it off, else the Options setting decides.
+    let flag = |names: [&str; 2]| std::env::args().skip(1).any(|a| names.iter().any(|n| a.eq_ignore_ascii_case(n)));
+    if !flag(["--no-log", "/nolog"]) && (flag(["--log", "/log"]) || theme::load_settings().logging) {
+        log::enable();
+    }
     // WinPE package: a Mesa opengl32.dll (software OpenGL, there is no GPU driver) sits beside the exe.
     // Keep it on its pure software rasteriser (its d3d12 back end needs DLLs WinPE lacks) and limit
     // the threads (the default, one per core, hung or powered off an 8-core AMD laptop).

@@ -118,6 +118,8 @@ pub struct Panel {
     /// Tells when something in the shown folder changed (Windows change notification).
     watch: Option<Watch>,
     last_reload: std::time::Instant,
+    /// A background re-read of the folder (after a change on disk) and the folder it is for.
+    bg_refresh: Option<(PathBuf, Receiver<io::Result<Vec<Entry>>>)>,
 }
 
 /// A change watcher on the folder a panel shows.
@@ -161,6 +163,7 @@ impl Panel {
             size_work: Vec::new(),
             watch: None,
             last_reload: std::time::Instant::now(),
+            bg_refresh: None,
         };
         p.reload();
         p
@@ -180,21 +183,77 @@ impl Panel {
             }
         }
         self.sync_watch(on_disk);
+        if !on_disk {
+            self.bg_refresh = None;
+        } else if self.poll_bg_refresh() {
+            return;
+        }
         // Changes reported by the system (also a file that grew or was overwritten, which does not
         // touch the folder's own time) are picked up at most every 300 ms, however busy the folder is.
         let dirty = self.watch.as_ref().is_some_and(|w| w.dirty.load(std::sync::atomic::Ordering::Relaxed));
         if on_disk && dirty {
-            if self.last_reload.elapsed() >= std::time::Duration::from_millis(300) {
+            // Big folders are looked at less often (a copy into one keeps changing it).
+            let gap = std::time::Duration::from_millis((self.listing.len() / 50).max(300) as u64);
+            if self.last_reload.elapsed() >= gap {
                 if let Some(w) = &self.watch {
                     w.dirty.store(false, std::sync::atomic::Ordering::Relaxed);
                 }
-                self.reload();
+                self.start_bg_refresh();
             } else {
-                self.ctx.request_repaint_after(std::time::Duration::from_millis(300));
+                self.ctx.request_repaint_after(gap);
             }
         } else if on_disk && self.folder_stamp() != self.stamp {
-            self.reload();
+            self.start_bg_refresh();
         }
+    }
+
+    /// Re-reads and sorts the folder on a worker thread, so a huge folder never freezes the window.
+    fn start_bg_refresh(&mut self) {
+        self.last_reload = std::time::Instant::now();
+        self.stamp = self.folder_stamp();
+        let (tx, rx) = mpsc::channel();
+        let (cwd, sort, desc, ctx) = (self.cwd.clone(), self.sort, self.sort_desc, self.ctx.clone());
+        self.bg_refresh = Some((cwd.clone(), rx));
+        std::thread::spawn(move || {
+            let result = list_dir(&cwd).map(|mut list| {
+                sort_entries(&mut list, sort, desc);
+                list
+            });
+            let _ = tx.send(result);
+            ctx.request_repaint();
+        });
+    }
+
+    /// Takes the result of a background re-read. True while one is still running.
+    fn poll_bg_refresh(&mut self) -> bool {
+        let Some((path, rx)) = &self.bg_refresh else { return false };
+        match rx.try_recv() {
+            Err(TryRecvError::Empty) => return true,
+            Ok(result) if *path == self.cwd => {
+                self.bg_refresh = None;
+                self.last_reload = std::time::Instant::now();
+                let keep = self.entries.get(self.cursor).map(|e| e.name.clone());
+                match result {
+                    Ok(mut entries) => {
+                        for e in entries.iter_mut().filter(|e| e.is_dir) {
+                            if let Some(s) = self.dir_sizes.get(&e.path) {
+                                e.size = *s;
+                            }
+                        }
+                        self.listing = entries;
+                        self.error = None;
+                    }
+                    Err(e) => {
+                        self.listing.clear();
+                        self.error = Some(e.to_string());
+                    }
+                }
+                self.apply_view(keep);
+                self.marked.retain(|m| self.listing.iter().any(|e| &e.path == m));
+            }
+            _ => self.bg_refresh = None,
+        }
+        false
     }
 
     /// Keeps a change watcher on the folder that is shown (none for archives and servers; when the
@@ -221,6 +280,7 @@ impl Panel {
 
     /// Re-reads the directory and keeps the cursor on the same name when possible.
     pub fn reload(&mut self) {
+        self.bg_refresh = None;
         self.last_reload = std::time::Instant::now();
         let keep = self.entries.get(self.cursor).map(|e| e.name.clone());
         if self.ftp.is_some() {
@@ -1216,7 +1276,14 @@ mod tests {
         let mut p = new_panel(&dir);
         std::thread::sleep(std::time::Duration::from_millis(30));
         std::fs::write(dir.join("new.crc"), b"x").unwrap();
-        p.refresh_if_changed();
+        // the re-read runs on a worker thread: poll until it has delivered
+        for _ in 0..200 {
+            p.refresh_if_changed();
+            if p.entries.iter().any(|e| e.name == "new.crc") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         assert!(p.entries.iter().any(|e| e.name == "new.crc"));
         std::fs::remove_dir_all(&dir).unwrap();
     }

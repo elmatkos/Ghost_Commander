@@ -1,14 +1,23 @@
-//! Diagnostic log `gc.log` next to the exe (startup steps, panics, crashes, exit result).
+//! Diagnostic log `gc.log` next to the exe (startup steps, panics, crashes, UI stalls).
 //! A GUI exe has no console, so this is the only way to see why it died (e.g. in WinPE).
+//!
+//! Off by default. Switched on by `--log`, by Config > Options, or `logging = true` in settings.toml;
+//! `--no-log` forces it off. It can be toggled while the program runs.
 
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, Once};
 use std::time::{Duration, Instant};
 
 static FILE: Mutex<Option<std::fs::File>> = Mutex::new(None);
+static HOOKS: Once = Once::new();
 
-/// Appends one timestamped line; silently does nothing when the log could not be created.
+/// True while lines are being written.
+pub fn is_enabled() -> bool {
+    FILE.lock().map_or(false, |f| f.is_some())
+}
+
+/// Appends one timestamped line; does nothing while logging is off.
 pub fn log(msg: &str) {
     if let Ok(mut guard) = FILE.lock() {
         if let Some(f) = guard.as_mut() {
@@ -18,30 +27,52 @@ pub fn log(msg: &str) {
     }
 }
 
-/// Creates a fresh `gc.log` (next to the exe, else in the current folder) and installs the panic
-/// hook and, on Windows, an unhandled-exception filter that record what killed the process.
-pub fn init() {
+pub fn set_enabled(on: bool) {
+    if on {
+        enable();
+    } else if is_enabled() {
+        log("logging switched off");
+        if let Ok(mut guard) = FILE.lock() {
+            *guard = None;
+        }
+    }
+}
+
+/// Creates a fresh `gc.log` (next to the exe, else in the current folder). The panic hook, the
+/// crash filter and the stall watchdog are installed the first time and stay (silent while off).
+pub fn enable() {
+    if is_enabled() {
+        return;
+    }
     let beside_exe = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("gc.log")));
     let file = beside_exe.and_then(|p| std::fs::File::create(p).ok()).or_else(|| std::fs::File::create("gc.log").ok());
     if let Ok(mut guard) = FILE.lock() {
         *guard = file;
     }
-    log(&format!("Ghost Commander v{} starting", env!("CARGO_PKG_VERSION")));
+    log(&format!("Ghost Commander v{} logging on", env!("CARGO_PKG_VERSION")));
     log(&format!("args: {:?}, cwd: {:?}", std::env::args().collect::<Vec<_>>(), std::env::current_dir()));
-    std::panic::set_hook(Box::new(|info| {
-        log(&format!("PANIC: {info}\n{}", std::backtrace::Backtrace::force_capture()));
-    }));
-    #[cfg(windows)]
-    install_crash_filter();
-    // Tells apart "someone called exit()" (this runs) from ExitProcess/TerminateProcess (it does not).
-    extern "C" fn at_exit() {
-        log("atexit handler ran (C runtime exit path)");
-    }
-    extern "C" {
-        fn atexit(cb: extern "C" fn()) -> i32;
-    }
-    // SAFETY: `at_exit` has the C ABI and stays valid for the whole process.
-    unsafe { atexit(at_exit) };
+    HOOKS.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if is_enabled() {
+                log(&format!("PANIC: {info}\n{}", std::backtrace::Backtrace::force_capture()));
+            } else {
+                previous(info);
+            }
+        }));
+        #[cfg(windows)]
+        install_crash_filter();
+        // Tells apart "someone called exit()" (this runs) from ExitProcess/TerminateProcess (it does not).
+        extern "C" fn at_exit() {
+            log("atexit handler ran (C runtime exit path)");
+        }
+        extern "C" {
+            fn atexit(cb: extern "C" fn()) -> i32;
+        }
+        // SAFETY: `at_exit` has the C ABI and stays valid for the whole process.
+        unsafe { atexit(at_exit) };
+        start_watchdog();
+    });
 }
 
 #[cfg(windows)]
@@ -62,7 +93,7 @@ fn install_crash_filter() {
         log(&format!("UNHANDLED EXCEPTION: {code:#x?}"));
         0 // EXCEPTION_CONTINUE_SEARCH: let Windows terminate as usual
     }
-    // SAFETY: `filter` has the required signature and lives for the whole process.
+    // SAFETY: both functions have the required signature and live for the whole process.
     unsafe {
         SetUnhandledExceptionFilter(Some(filter));
         AddVectoredExceptionHandler(1, Some(first_chance));
@@ -85,8 +116,8 @@ pub fn frame_edge(entering: bool) {
 }
 
 /// Logs when the UI thread makes no progress for 5 s: stuck in our `update` code, or outside it
-/// (rendering, buffer swap, the OS event loop). Silent while everything runs normally.
-pub fn start_watchdog() {
+/// (rendering, buffer swap, the OS event loop). Silent while everything runs normally or logging is off.
+fn start_watchdog() {
     START.get_or_init(Instant::now);
     std::thread::spawn(|| {
         let mut reported = false;

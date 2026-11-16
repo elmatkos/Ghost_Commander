@@ -11,7 +11,6 @@ use std::iter::once;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::ptr::{null, null_mut};
-use std::sync::atomic::Ordering;
 
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, BOOL, ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS, ERROR_REQUEST_ABORTED, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Storage::FileSystem::{
@@ -47,7 +46,7 @@ unsafe extern "system" fn on_progress(_total: i64, transferred: i64, _stream_siz
     if stream == 1 {
         let now = transferred.max(0) as u64;
         let delta = now.saturating_sub(ctx.last.replace(now));
-        ctx.p.done.fetch_add(delta, Ordering::Relaxed);
+        ctx.p.add_done(delta);
         // pause / speed limit: this callback runs after every block the system copies
         ctx.p.pace(delta);
     }

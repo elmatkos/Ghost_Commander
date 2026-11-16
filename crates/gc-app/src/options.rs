@@ -8,6 +8,8 @@ pub struct Options {
     pub open: bool,
     pub drive_buttons: bool,
     pub drive_free_bar: bool,
+    pub drive_free_text: bool,
+    pub logging: bool,
     pub switch_on_missing_drive: bool,
     pub pdf_turn_pages: bool,
     pub ext_column: bool,
@@ -17,7 +19,7 @@ pub struct Options {
 impl Options {
     pub fn load() -> Self {
         let s = load_settings();
-        Self { open: false, drive_buttons: s.drive_buttons, drive_free_bar: s.drive_free_bar, switch_on_missing_drive: s.switch_on_missing_drive, pdf_turn_pages: s.pdf_turn_pages, ext_column: s.ext_column, error: None }
+        Self { open: false, drive_buttons: s.drive_buttons, drive_free_bar: s.drive_free_bar, drive_free_text: s.drive_free_text, logging: s.logging || crate::log::is_enabled(), switch_on_missing_drive: s.switch_on_missing_drive, pdf_turn_pages: s.pdf_turn_pages, ext_column: s.ext_column, error: None }
     }
 
     pub fn show(&mut self, ctx: &egui::Context) {
@@ -32,6 +34,7 @@ impl Options {
             changed |= ui.checkbox(&mut self.drive_buttons, "Show drive buttons above each panel").changed();
             ui.add_enabled_ui(self.drive_buttons, |ui| {
                 changed |= ui.checkbox(&mut self.drive_free_bar, "Show a free-space bar under every drive").changed();
+                changed |= ui.checkbox(&mut self.drive_free_text, "Show \"x of y free\" of the current drive under the buttons").changed();
             });
             ui.add_space(2.0);
             ui.weak("Also adds \\ (root of the drive) and .. (parent folder) buttons.");
@@ -66,6 +69,16 @@ impl Options {
                     "On: Down at the end of a page shows the start of the next page, Up at the top shows the end of the previous page, like scrolling through one long document.\n\nOff: the arrow keys stop at the page edges; use PgUp / PgDn or Left / Right to change the page.",
                 );
             });
+            ui.add_space(10.0);
+            ui.heading("Diagnostics");
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if ui.checkbox(&mut self.logging, "Write a log file (gc.log next to the program)").changed() {
+                    crate::log::set_enabled(self.logging);
+                    changed = true;
+                }
+                info_icon(ui).on_hover_text("Startup steps, panics, crashes and UI stalls. The switch --log turns it on from the command line, --no-log forces it off.");
+            });
             if let Some(e) = &self.error {
                 ui.colored_label(ui.visuals().error_fg_color, e);
             }
@@ -74,6 +87,8 @@ impl Options {
             let mut s = load_settings();
             s.drive_buttons = self.drive_buttons;
             s.drive_free_bar = self.drive_free_bar;
+            s.drive_free_text = self.drive_free_text;
+            s.logging = self.logging;
             s.switch_on_missing_drive = self.switch_on_missing_drive;
             s.pdf_turn_pages = self.pdf_turn_pages;
             s.ext_column = self.ext_column;

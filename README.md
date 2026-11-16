@@ -2,7 +2,7 @@
 
 A fast, modern, dual-pane file manager written in Rust. It follows the Norton / Total / Midnight Commander tradition and aims to keep every feature of those three while improving on them.
 
-**Status:** v0.35.1, Windows (x64), actively developed. Also runs under WinPE.
+**Status:** v0.38.0, Windows (x64), actively developed. Also runs under WinPE.
 
 **Repo:** https://github.com/elmatkos/Ghost_Commander
 
@@ -91,6 +91,13 @@ Branding lives in `assets/` (`icon.ico` is embedded into the exe by `crates/gc-a
 - The "File exists" dialog shows the size and time of the existing file and has **Overwrite if newer (N)**: the file is replaced only when the source is newer, otherwise it is skipped (with "Apply to all" this is decided per file). For files inside archives and on FTP servers the age cannot be compared, so it overwrites.
 - Editor: **Regex** checkbox in Find / Replace (Rust regex syntax, `$1` groups in the replacement, `^` / `$` match at every line), **Ctrl+/** comments or uncomments the selected lines (`//`, `#`, `;`, `::`, `'` by language), **Enter** keeps the indentation (one level deeper after `{ ( [` or `:`).
 - Panels follow the folder through the Windows change notification instead of polling its time, so a file that grows or is overwritten is noticed too (at most every 300 ms). Archives opened lately (8 of them) are kept in memory: opening one again is instant unless it changed on disk.
+
+## Progress window, streaming copy / delete, logging (v0.38.0)
+
+- F5 / F6 / F8 open a **progress window**: percentage bar, a graph of the recent speed, bytes (files for a delete) done, speed and time left, "Files: x of y" and the files being worked on right now (one per worker thread; copies show the percentage of each file). **Hide** closes it; the bottom bar then keeps the percentage, Pause / limit / Cancel and a **Show progress** button.
+- Copy and permanent delete **start at once** while one thread still walks the folders: until the walk ends the window and the bottom bar read "Calculating..." instead of a percentage. A delete runs on several threads (one on a spinning disk), counts progress in files, removes read-only files and folder links, and deletes the folders last.
+- Panels re-read a changing folder (a copy into it) on a worker thread, at most every 300 ms (less often for big folders), so the window stays usable.
+- Config > Options: "Show x of y free of the current drive under the buttons" (a line under the drive buttons) and **Diagnostics**: write `gc.log` (off by default). Command line: `--log` (or `/log`) switches it on, `--no-log` forces it off.
 
 ## Themes and file icons
 
@@ -199,7 +206,7 @@ The same exe runs in WinPE; only the package differs (`ghost-commander-vX-winpe-
 - `ghost-commander.exe` is built with a static C runtime (`.cargo/config.toml`), so no VC++ redistributable is needed. `dxgi.dll` and `tbs.dll` (GPU and TPM rows of System Info) are delay-loaded and skipped when WinPE lacks them.
 - WinPE has no GPU driver and no OpenGL, so the zip carries Mesa's software OpenGL: `opengl32.dll` + `libgallium_wgl.dll` (Mesa 26.2.5 MSVC release from `pal1000/mesa-dist-win`, not stored in the repo). When `libgallium_wgl.dll` is beside the exe, the app sets `GALLIUM_DRIVER=llvmpipe` and `LP_NUM_THREADS=4` (unless already set); the default of one thread per core hung an 8-core AMD laptop. Normal installs have no such DLL and use the real driver.
 - The theme is pinned to egui's dark/light mode, otherwise WinPE's system theme overrode the chosen one on the first frame.
-- `gc.log` next to the exe records startup steps, the OpenGL renderer, panics, crashes and UI stalls longer than 5 s.
+- `gc.log` next to the exe (off by default: start with `--log` or tick Config > Options > Diagnostics) records startup steps, the OpenGL renderer, panics, crashes and UI stalls longer than 5 s.
 - Tested on Lenovo L13 G3 AMD and L16 G2 Intel, WinPE 10.0.26100 booted from SCCM.
 
 ## License

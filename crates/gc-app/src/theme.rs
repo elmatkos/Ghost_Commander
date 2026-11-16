@@ -259,6 +259,10 @@ pub struct Settings {
     pub drive_buttons: bool,
     /// Free-space bar under each drive button.
     pub drive_free_bar: bool,
+    /// "x of y free" line under the drive buttons.
+    pub drive_free_text: bool,
+    /// Write `gc.log` next to the program (diagnostics).
+    pub logging: bool,
     /// Folders the left / right panel showed when the app was last used.
     pub left_dir: Option<String>,
     pub right_dir: Option<String>,
@@ -288,7 +292,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { theme: None, drive_buttons: true, drive_free_bar: true, left_dir: None, right_dir: None, left_tabs: Vec::new(), right_tabs: Vec::new(), left_tab: 0, right_tab: 0, switch_on_missing_drive: false, win_pos: None, win_size: None, win_maximized: false, wrap_lines: false, auto_reload: true, pdf_turn_pages: true, ext_column: false, bookmarks: Vec::new() }
+        Self { theme: None, drive_buttons: true, drive_free_bar: true, drive_free_text: true, logging: false, left_dir: None, right_dir: None, left_tabs: Vec::new(), right_tabs: Vec::new(), left_tab: 0, right_tab: 0, switch_on_missing_drive: false, win_pos: None, win_size: None, win_maximized: false, wrap_lines: false, auto_reload: true, pdf_turn_pages: true, ext_column: false, bookmarks: Vec::new() }
     }
 }
 

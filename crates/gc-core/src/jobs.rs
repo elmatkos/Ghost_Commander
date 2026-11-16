@@ -6,7 +6,9 @@ use std::fs::File;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -15,6 +17,18 @@ use std::time::{Duration, Instant};
 use crate::winfs;
 
 const BUF_SIZE: usize = 1024 * 1024;
+
+thread_local! {
+    /// Byte counter of the file this worker thread is copying right now.
+    static CURRENT: RefCell<Option<Arc<AtomicU64>>> = const { RefCell::new(None) };
+}
+
+/// A file a worker is busy with.
+struct ActiveFile {
+    path: PathBuf,
+    size: u64,
+    done: Arc<AtomicU64>,
+}
 
 #[derive(Debug, Clone)]
 pub enum Op {
@@ -83,6 +97,16 @@ pub struct Progress {
     pub limit: AtomicU64,
     /// Start of the current speed window, bytes counted in it and the limit it was started with.
     pace_window: Mutex<Option<(Instant, u64, u64)>>,
+    /// True while a copy is still walking the source folders: `total` and `files_total` only grow
+    /// until it ends, because the copying starts at once instead of waiting for the count.
+    pub scanning: AtomicBool,
+    /// Files found / finished (copies only; 0 when not counted).
+    pub files_total: AtomicU64,
+    pub files_done: AtomicU64,
+    /// Progress is counted in files, not bytes (delete).
+    pub by_files: AtomicBool,
+    /// Files being worked on right now (one per worker).
+    active: Mutex<Vec<ActiveFile>>,
     errors: Mutex<Vec<String>>,
     /// Sticky answer after "apply to all".
     sticky: Mutex<Option<Resolution>>,
@@ -108,6 +132,36 @@ impl Progress {
     pub fn resolve(&self, resolution: Resolution, apply_to_all: bool) {
         *self.answer.lock().unwrap() = Some((resolution, apply_to_all));
         self.answered.notify_all();
+    }
+
+    /// Files the workers are busy with right now: path, size and bytes done so far.
+    pub fn active_files(&self) -> Vec<(PathBuf, u64, u64)> {
+        self.active.lock().unwrap().iter().map(|a| (a.path.clone(), a.size, a.done.load(Ordering::Relaxed))).collect()
+    }
+
+    /// Counts `n` more bytes, for the job and for the file this thread is working on.
+    pub fn add_done(&self, n: u64) {
+        self.done.fetch_add(n, Ordering::Relaxed);
+        CURRENT.with(|c| {
+            if let Some(a) = c.borrow().as_ref() {
+                a.fetch_add(n, Ordering::Relaxed);
+            }
+        });
+    }
+
+    fn file_started(&self, path: &Path, size: u64) {
+        let done = Arc::new(AtomicU64::new(0));
+        CURRENT.with(|c| *c.borrow_mut() = Some(done.clone()));
+        self.active.lock().unwrap().push(ActiveFile { path: path.to_path_buf(), size, done });
+    }
+
+    fn file_finished(&self, path: &Path) {
+        CURRENT.with(|c| *c.borrow_mut() = None);
+        let mut active = self.active.lock().unwrap();
+        if let Some(i) = active.iter().position(|a| a.path == path) {
+            active.remove(i);
+        }
+        self.files_done.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn fail(&self, msg: String) {
@@ -216,8 +270,18 @@ pub fn run(op: &Op, p: &Progress) {
             &single
         }
     };
+    if let Op::Copy { srcs, dest_dir } = op {
+        copy_all(srcs, dest_dir, p);
+        return;
+    }
+    if let Op::Delete { permanent, .. } = op {
+        delete_all(srcs, *permanent, p);
+        return;
+    }
+    p.scanning.store(true, Ordering::Release);
     let total: u64 = srcs.iter().map(|s| tree_size(s)).sum();
     p.total.store(total, Ordering::Relaxed);
+    p.scanning.store(false, Ordering::Release);
 
     for src in srcs {
         if p.cancelled() {
@@ -228,7 +292,7 @@ pub fn run(op: &Op, p: &Progress) {
             Op::Move { dest_dir, .. } => fs::create_dir_all(dest_dir).and_then(|_| target_of(src, dest_dir)).and_then(|t| move_tree(src, &t, p)),
             Op::CopyTo { target, .. } => prepare_target(src, target).and_then(|_| copy_tree(src, target, p)),
             Op::MoveTo { target, .. } => prepare_target(src, target).and_then(|_| move_tree(src, target, p)),
-            Op::Delete { permanent, .. } => delete_tree(src, *permanent, p),
+            Op::Delete { .. } => unreachable!("handled by delete_all"),
         };
         if let Err(e) = result {
             p.fail(format!("{}: {e}", src.display()));
@@ -282,7 +346,7 @@ const UNBUFFERED_MIN: u64 = 256 * 1024 * 1024;
 const MAX_WORKERS: usize = 4;
 
 /// Creates the folders of `src` below `dst` and lists the files that have to be copied.
-fn plan_copy(src: &Path, dst: &Path, p: &Progress, files: &mut Vec<FileJob>) -> io::Result<()> {
+fn plan_copy(src: &Path, dst: &Path, p: &Progress, emit: &mut dyn FnMut(FileJob)) -> io::Result<()> {
     let meta = fs::symlink_metadata(src)?;
     if meta.is_dir() {
         match fs::create_dir(dst) {
@@ -295,10 +359,10 @@ fn plan_copy(src: &Path, dst: &Path, p: &Progress, files: &mut Vec<FileJob>) -> 
                 return Ok(());
             }
             let entry = entry?;
-            plan_copy(&entry.path(), &dst.join(entry.file_name()), p, files)?;
+            plan_copy(&entry.path(), &dst.join(entry.file_name()), p, emit)?;
         }
     } else {
-        files.push(FileJob { src: src.to_path_buf(), dst: dst.to_path_buf(), size: meta.len() });
+        emit(FileJob { src: src.to_path_buf(), dst: dst.to_path_buf(), size: meta.len() });
     }
     Ok(())
 }
@@ -320,9 +384,62 @@ fn worker_count(src: &Path, dst: &Path) -> usize {
 
 fn copy_tree(src: &Path, dst: &Path, p: &Progress) -> io::Result<()> {
     let mut files = Vec::new();
-    plan_copy(src, dst, p, &mut files)?;
+    plan_copy(src, dst, p, &mut |f| files.push(f))?;
     let workers = if files.len() > 1 { worker_count(src, dst) } else { 1 };
     copy_files(&files, workers, p)
+}
+
+/// Copies `srcs` into `dest_dir`: one thread walks the folders (creating the target folders and
+/// counting what is found) while the workers copy the files as soon as they are listed, so a
+/// huge tree starts copying at once and the total only becomes known later.
+fn copy_all(srcs: &[PathBuf], dest_dir: &Path, p: &Progress) {
+    if let Err(e) = fs::create_dir_all(dest_dir) {
+        p.fail(format!("{}: {e}", dest_dir.display()));
+        return;
+    }
+    let workers = srcs.first().map_or(1, |s| worker_count(s, dest_dir));
+    let (tx, rx) = mpsc::channel::<FileJob>();
+    let rx = Mutex::new(rx);
+    let errors: Mutex<Vec<(PathBuf, io::Error)>> = Mutex::new(Vec::new());
+    p.scanning.store(true, Ordering::Release);
+    thread::scope(|s| {
+        s.spawn(move || {
+            for src in srcs {
+                if p.cancelled() {
+                    break;
+                }
+                let result = target_of(src, dest_dir).and_then(|target| {
+                    plan_copy(src, &target, p, &mut |f| {
+                        p.total.fetch_add(f.size, Ordering::Relaxed);
+                        p.files_total.fetch_add(1, Ordering::Relaxed);
+                        let _ = tx.send(f);
+                    })
+                });
+                if let Err(e) = result {
+                    p.fail(format!("{}: {e}", src.display()));
+                }
+            }
+            p.scanning.store(false, Ordering::Release);
+        });
+        for _ in 0..workers {
+            s.spawn(|| loop {
+                if p.cancelled() {
+                    break;
+                }
+                // Waiting for the next file while holding the lock is fine: the others queue behind it.
+                let Ok(f) = rx.lock().unwrap().recv() else { break };
+                p.file_started(&f.src, f.size);
+                if let Err(e) = copy_file(&f.src, &f.dst, f.size, p) {
+                    errors.lock().unwrap().push((f.src.clone(), e));
+                }
+                p.file_finished(&f.src);
+            });
+        }
+    });
+    p.scanning.store(false, Ordering::Release);
+    for (path, e) in errors.into_inner().unwrap() {
+        p.fail(format!("{}: {e}", path.display()));
+    }
 }
 
 /// Copies the files on `workers` threads. A single failing file returns its own error; with
@@ -335,9 +452,11 @@ fn copy_files(files: &[FileJob], workers: usize, p: &Progress) -> io::Result<()>
             break;
         }
         let Some(f) = files.get(next.fetch_add(1, Ordering::Relaxed)) else { break };
+        p.file_started(&f.src, f.size);
         if let Err(e) = copy_file(&f.src, &f.dst, f.size, p) {
             errors.lock().unwrap().push((f.src.clone(), e));
         }
+        p.file_finished(&f.src);
     };
     if workers <= 1 {
         work();
@@ -375,7 +494,7 @@ fn copy_file(src: &Path, dst: &Path, size: u64, p: &Progress) -> io::Result<()> 
                 }
                 match p.ask_conflict_src(&target, Some(src)) {
                     Resolution::Skip => {
-                        p.done.fetch_add(size, Ordering::Relaxed);
+                        p.add_done(size);
                         return Ok(());
                     }
                     Resolution::Cancel => return Ok(()),
@@ -416,7 +535,7 @@ pub fn copy_stream(input: &mut dyn Read, size: u64, dst: &Path, p: &Progress) ->
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists && !target.is_dir() => {
             match p.ask_conflict(&target) {
                 Resolution::Skip => {
-                    p.done.fetch_add(size, Ordering::Relaxed);
+                    p.add_done(size);
                     return Ok(None);
                 }
                 Resolution::Cancel => return Ok(None),
@@ -441,7 +560,7 @@ pub fn copy_stream(input: &mut dyn Read, size: u64, dst: &Path, p: &Progress) ->
             break;
         }
         output.write_all(&buf[..n])?;
-        p.done.fetch_add(n as u64, Ordering::Relaxed);
+        p.add_done(n as u64);
         p.pace(n as u64);
     }
     output.flush()?;
@@ -490,7 +609,7 @@ fn move_tree(src: &Path, dst: &Path, p: &Progress) -> io::Result<()> {
             }
             (false, false) => match p.ask_conflict_src(&dst, Some(src)) {
                 Resolution::Skip => {
-                    p.done.fetch_add(existing.len(), Ordering::Relaxed);
+                    p.add_done(existing.len());
                     return Ok(());
                 }
                 Resolution::Cancel => return Ok(()),
@@ -502,7 +621,7 @@ fn move_tree(src: &Path, dst: &Path, p: &Progress) -> io::Result<()> {
     }
     let size = tree_size(src);
     if fs::rename(src, &dst).is_ok() {
-        p.done.fetch_add(size, Ordering::Relaxed);
+        p.add_done(size);
         return Ok(());
     }
     // Different volume: copy, then delete the source only if the copy finished.
@@ -517,17 +636,117 @@ fn move_tree(src: &Path, dst: &Path, p: &Progress) -> io::Result<()> {
     }
 }
 
-fn delete_tree(path: &Path, permanent: bool, p: &Progress) -> io::Result<()> {
-    let size = tree_size(path);
-    if !permanent {
-        trash::delete(path).map_err(|e| io::Error::other(e.to_string()))?;
-    } else if fs::symlink_metadata(path)?.is_dir() {
-        fs::remove_dir_all(path)?;
+/// Walks `path`: files go to `emit`, folders are collected children-first so they can be removed last.
+fn plan_delete(path: &Path, p: &Progress, dirs: &mut Vec<PathBuf>, emit: &mut dyn FnMut(PathBuf, u64)) {
+    let meta = match fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) => return p.fail(format!("{}: {e}", path.display())),
+    };
+    if meta.is_dir() {
+        match fs::read_dir(path) {
+            Ok(rd) => {
+                for entry in rd.flatten() {
+                    if p.cancelled() {
+                        return;
+                    }
+                    plan_delete(&entry.path(), p, dirs, emit);
+                }
+            }
+            Err(e) => p.fail(format!("{}: {e}", path.display())),
+        }
+        dirs.push(path.to_path_buf());
     } else {
-        fs::remove_file(path)?;
+        emit(path.to_path_buf(), meta.len());
     }
-    p.done.fetch_add(size, Ordering::Relaxed);
-    Ok(())
+}
+
+/// Removes a file; read-only files and folder links are handled too.
+fn remove_file_force(path: &Path) -> io::Result<()> {
+    let Err(e) = fs::remove_file(path) else { return Ok(()) };
+    if let Ok(m) = fs::symlink_metadata(path) {
+        let mut perm = m.permissions();
+        if perm.readonly() {
+            perm.set_readonly(false);
+            if fs::set_permissions(path, perm).is_ok() && fs::remove_file(path).is_ok() {
+                return Ok(());
+            }
+        }
+    }
+    fs::remove_dir(path).map_err(|_| e)
+}
+
+/// Deletes `srcs`. A permanent delete walks the folders on one thread while the workers remove the
+/// files as soon as they are listed (the total is only known later); the folders go last.
+/// Recycling goes item by item through the shell.
+fn delete_all(srcs: &[PathBuf], permanent: bool, p: &Progress) {
+    p.by_files.store(true, Ordering::Release);
+    if !permanent {
+        p.files_total.store(srcs.len() as u64, Ordering::Relaxed);
+        for src in srcs {
+            if p.cancelled() {
+                return;
+            }
+            p.file_started(src, 0);
+            if let Err(e) = trash::delete(src) {
+                p.fail(format!("{}: {e}", src.display()));
+            }
+            p.file_finished(src);
+        }
+        return;
+    }
+    let workers = srcs.first().map_or(1, |s| worker_count(s, s));
+    let (tx, rx) = mpsc::channel::<(PathBuf, u64)>();
+    let rx = Mutex::new(rx);
+    let errors: Mutex<Vec<(PathBuf, io::Error)>> = Mutex::new(Vec::new());
+    let dirs: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+    let dirs_out = &dirs;
+    p.scanning.store(true, Ordering::Release);
+    thread::scope(|s| {
+        s.spawn(move || {
+            let mut found = Vec::new();
+            for src in srcs {
+                if p.cancelled() {
+                    break;
+                }
+                plan_delete(src, p, &mut found, &mut |path, size| {
+                    p.total.fetch_add(size, Ordering::Relaxed);
+                    p.files_total.fetch_add(1, Ordering::Relaxed);
+                    let _ = tx.send((path, size));
+                });
+            }
+            *dirs_out.lock().unwrap() = found;
+            p.scanning.store(false, Ordering::Release);
+        });
+        for _ in 0..workers {
+            s.spawn(|| loop {
+                if p.cancelled() {
+                    break;
+                }
+                let Ok((path, size)) = rx.lock().unwrap().recv() else { break };
+                p.file_started(&path, size);
+                match remove_file_force(&path) {
+                    Ok(()) => p.add_done(size),
+                    Err(e) => errors.lock().unwrap().push((path.clone(), e)),
+                }
+                p.file_finished(&path);
+            });
+        }
+    });
+    p.scanning.store(false, Ordering::Release);
+    let mut errors = errors.into_inner().unwrap();
+    if !p.cancelled() {
+        for dir in dirs.into_inner().unwrap() {
+            if let Err(e) = fs::remove_dir(&dir) {
+                // A folder that still holds a file that could not be removed is already reported.
+                if errors.is_empty() {
+                    errors.push((dir, e));
+                }
+            }
+        }
+    }
+    for (path, e) in errors {
+        p.fail(format!("{}: {e}", path.display()));
+    }
 }
 
 /// Creates a new folder inside `parent`.
