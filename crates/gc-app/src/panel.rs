@@ -278,6 +278,15 @@ impl Panel {
         self.watch = watcher.ok().and_then(|mut w| w.watch(&self.cwd, RecursiveMode::NonRecursive).ok().map(|_| Watch { dir: self.cwd.clone(), dirty, _watcher: w }));
     }
 
+    /// A folder that was deleted (by a job here) while shown: go to the closest parent that exists.
+    pub fn leave_if_gone(&mut self) {
+        if self.archive.is_none() && self.ftp.is_none() && !self.cwd.exists() {
+            if let Some(near) = nearest_existing(&self.cwd) {
+                self.go_to(near, None);
+            }
+        }
+    }
+
     /// Re-reads the directory and keeps the cursor on the same name when possible.
     pub fn reload(&mut self) {
         self.bg_refresh = None;

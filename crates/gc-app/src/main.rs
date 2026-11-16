@@ -138,6 +138,57 @@ fn job_fraction(p: &Progress) -> f32 {
     if total == 0 { 0.0 } else { (done as f32 / total as f32).clamp(0.0, 1.0) }
 }
 
+/// Flat progress bar: a dark track with an accent fill and the percentage in the middle.
+fn progress_bar(ui: &mut egui::Ui, frac: f32, width: f32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width.max(40.0), 18.0), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 4.0, ui.visuals().extreme_bg_color);
+    let fill = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width() * frac.clamp(0.0, 1.0), rect.height()));
+    if fill.width() > 0.5 {
+        painter.rect_filled(fill, 4.0, ui.visuals().hyperlink_color.gamma_multiply(0.85));
+    }
+    painter.rect_stroke(rect, 4.0, egui::Stroke::new(1.0_f32, ui.visuals().widgets.noninteractive.bg_stroke.color), egui::StrokeKind::Inside);
+    painter.text(rect.center(), egui::Align2::CENTER_CENTER, format!("{:.0}%", frac * 100.0), egui::FontId::proportional(12.5), ui.visuals().strong_text_color());
+}
+
+/// The same bar while the total is unknown: a bright stretch sweeps back and forth under "Calculating...".
+fn calculating_bar(ui: &mut egui::Ui, width: f32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width.max(40.0), 18.0), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 4.0, ui.visuals().extreme_bg_color);
+    let t = (ui.input(|i| i.time) * 0.8) as f32;
+    let ping = 1.0 - (t.rem_euclid(2.0) - 1.0).abs(); // 0..1..0
+    let len = rect.width() * 0.3;
+    let x = rect.left() + (rect.width() - len) * ping;
+    painter.rect_filled(egui::Rect::from_min_size(egui::pos2(x, rect.top()), egui::vec2(len, rect.height())), 4.0, ui.visuals().hyperlink_color.gamma_multiply(0.55));
+    painter.rect_stroke(rect, 4.0, egui::Stroke::new(1.0_f32, ui.visuals().widgets.noninteractive.bg_stroke.color), egui::StrokeKind::Inside);
+    painter.text(rect.center(), egui::Align2::CENTER_CENTER, "Calculating...", egui::FontId::proportional(12.5), ui.visuals().strong_text_color());
+    ui.ctx().request_repaint();
+}
+
+/// A small square whose edge is traced by a moving bright stretch, like a snake: "busy, total unknown".
+fn busy_square(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
+    let r = rect.shrink(2.0);
+    let at = |u: f32| {
+        let u = u.rem_euclid(1.0) * 4.0;
+        let f = u.fract();
+        match u as u32 {
+            0 => egui::pos2(r.left() + f * r.width(), r.top()),
+            1 => egui::pos2(r.right(), r.top() + f * r.height()),
+            2 => egui::pos2(r.right() - f * r.width(), r.bottom()),
+            _ => egui::pos2(r.left(), r.bottom() - f * r.height()),
+        }
+    };
+    let t = (ui.input(|i| i.time) * 0.9) as f32;
+    let painter = ui.painter();
+    let color = ui.visuals().hyperlink_color;
+    painter.rect_stroke(r, 1.0, egui::Stroke::new(1.0_f32, ui.visuals().widgets.noninteractive.bg_stroke.color), egui::StrokeKind::Inside);
+    let points: Vec<egui::Pos2> = (0..=12).map(|k| at(t - 0.3 + 0.3 * k as f32 / 12.0)).collect();
+    painter.add(egui::Shape::line(points, egui::Stroke::new(2.5_f32, color)));
+    ui.ctx().request_repaint();
+}
+
 /// Line graph of the recent speed (`values`), scaled to the fastest sample.
 fn speed_graph(ui: &mut egui::Ui, values: &[f32]) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 70.0), egui::Sense::hover());
@@ -1503,6 +1554,9 @@ impl App {
             }
         }
         if finished_now {
+            for p in &mut self.panels {
+                p.leave_if_gone();
+            }
             self.reload_all();
         }
         // Successful jobs disappear; failed ones stay until dismissed.
@@ -1525,9 +1579,10 @@ impl App {
                 } else {
                     if p.scanning.load(Ordering::Acquire) {
                         // The total is not known yet: no percentage, it would only jump around.
-                        ui.add(egui::ProgressBar::new(0.0).desired_width(200.0).text("Calculating...").animate(true));
+                        calculating_bar(ui, 200.0);
+                        busy_square(ui);
                     } else {
-                        ui.add(egui::ProgressBar::new(job_fraction(p)).desired_width(200.0).show_percentage());
+                        progress_bar(ui, job_fraction(p), 200.0);
                     }
                     if !j.show_dialog && ui.small_button("Show progress").clicked() {
                         reshow = Some(i);
@@ -1601,9 +1656,12 @@ impl App {
                 .default_width(460.0)
                 .show(ctx, |ui| {
                     if scanning {
-                        ui.add(egui::ProgressBar::new(0.0).desired_width(ui.available_width()).text("Calculating...").animate(true));
+                        ui.horizontal(|ui| {
+                            calculating_bar(ui, ui.available_width() - 24.0);
+                            busy_square(ui);
+                        });
                     } else {
-                        ui.add(egui::ProgressBar::new(frac).desired_width(ui.available_width()).show_percentage());
+                        progress_bar(ui, frac, ui.available_width());
                     }
                     if !j.history.is_empty() {
                         speed_graph(ui, &j.history);

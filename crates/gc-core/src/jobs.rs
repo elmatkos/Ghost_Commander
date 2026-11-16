@@ -270,9 +270,24 @@ pub fn run(op: &Op, p: &Progress) {
             &single
         }
     };
-    if let Op::Copy { srcs, dest_dir } = op {
-        copy_all(srcs, dest_dir, p);
-        return;
+    match op {
+        Op::Copy { srcs, dest_dir } => {
+            if let Err(e) = fs::create_dir_all(dest_dir) {
+                p.fail(format!("{}: {e}", dest_dir.display()));
+                return;
+            }
+            copy_all(srcs, &|src| target_of(src, dest_dir), dest_dir, p);
+            return;
+        }
+        Op::CopyTo { src, target } => {
+            if let Err(e) = prepare_target(src, target) {
+                p.fail(format!("{}: {e}", src.display()));
+                return;
+            }
+            copy_all(std::slice::from_ref(src), &|_| Ok(target.clone()), target, p);
+            return;
+        }
+        _ => {}
     }
     if let Op::Delete { permanent, .. } = op {
         delete_all(srcs, *permanent, p);
@@ -389,15 +404,11 @@ fn copy_tree(src: &Path, dst: &Path, p: &Progress) -> io::Result<()> {
     copy_files(&files, workers, p)
 }
 
-/// Copies `srcs` into `dest_dir`: one thread walks the folders (creating the target folders and
+/// Copies `srcs`, each to the path `target_for` gives: one thread walks the folders (creating the target folders and
 /// counting what is found) while the workers copy the files as soon as they are listed, so a
 /// huge tree starts copying at once and the total only becomes known later.
-fn copy_all(srcs: &[PathBuf], dest_dir: &Path, p: &Progress) {
-    if let Err(e) = fs::create_dir_all(dest_dir) {
-        p.fail(format!("{}: {e}", dest_dir.display()));
-        return;
-    }
-    let workers = srcs.first().map_or(1, |s| worker_count(s, dest_dir));
+fn copy_all(srcs: &[PathBuf], target_for: &(dyn Fn(&Path) -> io::Result<PathBuf> + Sync), dest: &Path, p: &Progress) {
+    let workers = srcs.first().map_or(1, |s| worker_count(s, dest));
     let (tx, rx) = mpsc::channel::<FileJob>();
     let rx = Mutex::new(rx);
     let errors: Mutex<Vec<(PathBuf, io::Error)>> = Mutex::new(Vec::new());
@@ -408,7 +419,7 @@ fn copy_all(srcs: &[PathBuf], dest_dir: &Path, p: &Progress) {
                 if p.cancelled() {
                     break;
                 }
-                let result = target_of(src, dest_dir).and_then(|target| {
+                let result = target_for(src).and_then(|target| {
                     plan_copy(src, &target, p, &mut |f| {
                         p.total.fetch_add(f.size, Ordering::Relaxed);
                         p.files_total.fetch_add(1, Ordering::Relaxed);
@@ -654,6 +665,8 @@ fn plan_delete(path: &Path, p: &Progress, dirs: &mut Vec<PathBuf>, emit: &mut dy
             }
             Err(e) => p.fail(format!("{}: {e}", path.display())),
         }
+        // folders count as items too: removing them takes a while and must show in the progress
+        p.files_total.fetch_add(1, Ordering::Relaxed);
         dirs.push(path.to_path_buf());
     } else {
         emit(path.to_path_buf(), meta.len());
@@ -736,12 +749,17 @@ fn delete_all(srcs: &[PathBuf], permanent: bool, p: &Progress) {
     let mut errors = errors.into_inner().unwrap();
     if !p.cancelled() {
         for dir in dirs.into_inner().unwrap() {
+            if p.cancelled() {
+                break;
+            }
+            p.file_started(&dir, 0);
             if let Err(e) = fs::remove_dir(&dir) {
                 // A folder that still holds a file that could not be removed is already reported.
                 if errors.is_empty() {
-                    errors.push((dir, e));
+                    errors.push((dir.clone(), e));
                 }
             }
+            p.file_finished(&dir);
         }
     }
     for (path, e) in errors {
